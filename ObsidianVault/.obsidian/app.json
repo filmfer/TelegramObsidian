@@ -1,0 +1,14 @@
+{
+  "alwaysUpdateLinks": false,
+  "autoUpdateFileCasing": true,
+  "showFrontmatter": true,
+  "showLineNumber": true,
+  "spellcheck": false,
+  "strictLineBreaks": false,
+  "useMarkdownLinks": false,
+  "wordWrap": false,
+  "showHiddenFiles": true,
+  "showInlineStatus": false,
+  "showResourcePath": false,
+  "enableMapFullHeightAttachments": false
+}

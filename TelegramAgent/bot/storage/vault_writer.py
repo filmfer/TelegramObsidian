@@ -2,14 +2,13 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
 logger = logging.getLogger(__name__)
 
-# Categories that map to top-level Obsidian folders.
-# The AI classifier returns category names; this maps them to vault directories.
+# Single source of truth: maps an AI category keyword to a vault folder.
 CATEGORY_MAP = {
     "travel": "Travel",
     "vacation": "Travel",
@@ -24,41 +23,47 @@ CATEGORY_MAP = {
     "iot": "IoT",
     "database": "Database",
     "data-analysis": "Data-Analysis",
+    "data_analysis": "Data-Analysis",
     "web-scraping": "Web-Scraping",
+    "web_scraping": "Web-Scraping",
     "exercise": "Fitness",
     "diet": "Food",
+    "food": "Food",
     "cooking": "Food",
-    # Add more mappings here as new categories emerge
 }
 
 DEFAULT_DETAIL = "detailed"
 
 
 def derive_detail_level(caption: Optional[str]) -> str:
-    """Map user caption to a detail level."""
+    """Map a user caption / command to a detail level."""
     if not caption:
         return DEFAULT_DETAIL
-    caption_lower = caption.strip().lower()
-
-    if "summar" in caption_lower:
+    cl = caption.strip().lower()
+    if "summar" in cl:
         return "summarize"
-    if "detail" in caption_lower:
+    if "detail" in cl:
         return "detailed"
-    if "precise" in caption_lower:
+    if "precise" in cl:
         return "precise"
-    if "raw" in caption_lower:
+    if "raw" in cl:
         return "raw"
     return DEFAULT_DETAIL
 
 
+def _normalize_categories(note: Dict[str, Any]) -> List[str]:
+    """Resolve note categories (plural or singular) into vault folder names."""
+    raw = note.get("categories") or [note.get("category", "Uncategorized")]
+    if isinstance(raw, str):
+        raw = [raw]
+    return [CATEGORY_MAP.get(str(c).replace("_", "-").lower(), str(c)) for c in raw]
+
+
 def write_note_to_vault(note: Dict[str, Any]) -> Optional[str]:
-    """
-    Write a Markdown note into the Obsidian vault using the category folder.
-    Returns the relative path of the note inside the vault, or None on failure.
-    """
+    """Write a Markdown note into the Obsidian vault under its primary category folder."""
     vault_root = os.getenv("OBSIDIAN_VAULT_PATH", "ObsidianVault")
-    category = note.get("category", "Uncategorized")
-    folder_name = CATEGORY_MAP.get(category, "Uncategorized")
+    mapped = _normalize_categories(note)
+    folder_name = mapped[0]
     folder_path = Path(vault_root) / folder_name
     folder_path.mkdir(parents=True, exist_ok=True)
 
@@ -68,19 +73,18 @@ def write_note_to_vault(note: Dict[str, Any]) -> Optional[str]:
     filename = f"{date_str}-{slug}.md"
     file_path = folder_path / filename
 
-    # Build YAML frontmatter
     frontmatter = {
         "title": title,
         "source": note.get("source", ""),
         "source_type": note.get("source_type", ""),
         "date": date_str,
-        "categories": [folder_name],
+        "categories": mapped,
         "tags": note.get("tags", []),
         "detail_level": note.get("detail_level", DEFAULT_DETAIL),
+        "attachment": note.get("attachment", ""),
     }
     frontmatter_yaml = yaml.dump(frontmatter, allow_unicode=True, sort_keys=False)
     markdown_body = note.get("content", "")
-
     full_note = f"---\n{frontmatter_yaml}---\n\n{markdown_body}\n"
 
     try:

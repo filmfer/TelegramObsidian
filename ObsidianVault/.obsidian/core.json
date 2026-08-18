@@ -1,0 +1,10 @@
+{
+  "daily-notes": true,
+  "templates": true,
+  "tag-panel": true,
+  "backlinks": true,
+  "outgoing-links": true,
+  "search": true,
+  "outliner": true,
+  "file-recovery": true
+}
