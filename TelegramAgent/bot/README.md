@@ -10,9 +10,13 @@ A Telegram bot that receives **documents**, **links**, and **emails**, analyzes 
   - Documents: `PDF, DOCX, XLSX, TXT, JSON, MD, CSV, EML`
   - Links: paste `https://...`
   - Emails: send a `.eml` file (or forward; dedicated IMAP inbox later)
+  - **E-books**: `PDF, EPUB, MOBI, AZW, AZW3, AZW4, DJVU, FB2, LIT`
+    - `book` detail level extracts **title / author(s) / publish year**
+      and attaches the original file to the note
 - **Detail levels** (caption keyword or command):
-  `/summarize` · `/detailed` · `/precise` · `/raw`  (default `detailed`)
-- **Multi-label AI categorization** into your folders: Travel, Car, Finance, Programming, AI, Religion, Politics, IoT, Database, Food…
+  `/summarize` · `/detailed` · `/precise` · `/raw` · `/book`
+  (default `detailed`)
+- **Multi-label AI categorization** into your folders: Travel, Car, Finance, Programming, AI, Religion, Politics, IoT, Database, Food, **Books**…
 - **Multi-device sync**: Google Drive + Git inside the vault (no conflicts, no data loss)
 
 ---
@@ -77,9 +81,34 @@ Git inside the vault prevents silent overwrite conflicts.
 | Command | Action |
 |---|---|
 | `/start` | Help message |
-| `/summarize` `/detailed` `/precise` `/raw` | Set default detail level |
-| *(send doc + caption)* | Detail level from caption, e.g. "summarize" |
+| `/summarize` `/detailed` `/precise` `/raw` `/book` | Set default detail level |
+| *(send doc + caption)* | Detail level from caption, e.g. "book" |
+| *(send e-book, any supported ext)* | Auto-detected → book note with title/author/year + attachment |
 | *(paste URL)* | Scrapes + summarizes the page |
+
+### Book notes (`/book` or caption `book`)
+
+When a document matches a book extension (or the detail level is `book`), the bot:
+
+1. Extracts **title, author(s), publish year** from the file metadata
+2. Writes a note to `Books/` with YAML frontmatter:
+
+   ```yaml
+   ---
+   title: "The Pragmatic Programmer"
+   source_type: book
+   book_title: "The Pragmatic Programmer"
+   book_authors: [Andrew Hunt, David Thomas]
+   book_year: "1999"
+   attachment: 90_Attachments/the-pragmatic-programmer.epub
+   detail_level: book
+   ---
+   ```
+
+3. Copies the original e-book into `90_Attachments/` so you can open it from Obsidian.
+
+> **Note**: EPUB/FB2/PDF metadata is parsed from the file. For MOBI/AZW/DJVU/LIT
+> full text decoding is best-effort — the file is still attached to the note.
 
 ---
 

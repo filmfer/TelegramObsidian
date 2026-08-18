@@ -16,6 +16,7 @@ from telegram.ext import (
 
 from parsers.document_parser import parse_document, SUPPORTED_EXTENSIONS
 from parsers.link_parser import parse_link
+from parsers.book_parser import BOOK_EXTENSIONS, is_book_file, extract_book_metadata
 from llm.analyzer import analyze_content
 from storage.vault_writer import write_note_to_vault, derive_detail_level
 
@@ -35,31 +36,39 @@ Path(VAULT_PATH).mkdir(parents=True, exist_ok=True)
 ATTACHMENTS_DIR = Path(VAULT_PATH, "90_Attachments")
 ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
+# Detail levels selectable via /command or caption
+DETAIL_LEVELS = {"summarize", "detailed", "precise", "raw", "book"}
+
 
 # ---- Command handlers ----
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Obsidian Knowledge Agent ready.\n\n"
-        "Send a document (PDF/DOCX/XLSX/TXT/JSON/MD/CSV/EML) or a link.\n\n"
-        "Set detail level with /summarize, /detailed, /precise, or /raw."
+        "Send a document (PDF/DOCX/XLSX/TXT/JSON/MD/CSV/EML), a link, or an e-book "
+        "(PDF/EPUB/MOBI/AZW/AZW3/AZW4/DJVU/FB2/LIT).\n\n"
+        "Set detail level with /summarize, /detailed, /precise, /raw, or /book."
     )
 
 
 async def set_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     level = update.message.text.lstrip("/").strip().lower()
-    if level in {"summarize", "detailed", "precise", "raw"}:
+    if level in DETAIL_LEVELS:
         context.user_data["detail_level"] = level
         await update.message.reply_text(f"✅ Detail level set to: {level}")
     else:
-        await update.message.reply_text("❌ Unknown level. Use /summarize, /detailed, /precise, /raw.")
+        await update.message.reply_text(
+            "❌ Unknown level. Use /summarize, /detailed, /precise, /raw, or /book."
+        )
 
 
 # ---- Message handlers ----
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption
-    detail_level = derive_detail_level(caption) if caption else context.user_data.get("detail_level", "detailed")
+    detail_level = (
+        derive_detail_level(caption) if caption else context.user_data.get("detail_level", "detailed")
+    )
 
     file_obj = await update.message.document.get_file()
     if not file_obj:
@@ -68,8 +77,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with tempfile.TemporaryDirectory() as tmp:
         local_path = await file_obj.download_to_drive(tmp)
-        content_text = parse_document(local_path)
         attachment_rel = _save_attachment(local_path)
+
+        # --- E-BOOK ROUTE ---
+        if detail_level == "book" or is_book_file(local_path):
+            book_meta = extract_book_metadata(local_path)
+            if not book_meta:
+                await update.message.reply_text(
+                    "❌ Could not extract book metadata. The file is still saved as an attachment."
+                )
+                return
+            await _save_book_note(
+                update, book_meta, detail_level=detail_level,
+                source=f"telegram-book::{Path(local_path).name}",
+                attachment=attachment_rel,
+            )
+            return
+
+        # --- STANDARD DOCUMENT ROUTE ---
+        content_text = parse_document(local_path)
 
     if not content_text:
         await update.message.reply_text("❌ Could not parse document content.")
@@ -112,6 +138,37 @@ def _save_attachment(local_path: str):
         return None
 
 
+async def _save_book_note(update, book_meta, detail_level="book", source="", attachment=None):
+    """Create a note that carries the extracted book metadata."""
+    note_dict = {
+        "title": book_meta.get("title", "Untitled Book"),
+        "category": "books",
+        "content": book_meta.get("text", "")[:20000] or "_(No extractable text.)_",
+        "tags": ["book"],
+        "source": source,
+        "source_type": "book",
+        "attachment": attachment,
+        "detail_level": detail_level,
+        "book_title": book_meta.get("title", ""),
+        "book_authors": book_meta.get("authors", []),
+        "book_year": book_meta.get("year", ""),
+    }
+
+    note_path = write_note_to_vault(note_dict)
+    if not note_path:
+        await update.message.reply_text("❌ Could not write to Obsidian vault.")
+        return
+
+    authors = ", ".join(note_dict["book_authors"]) if note_dict["book_authors"] else "Unknown"
+    year = note_dict["book_year"] or "Unknown"
+    await update.message.reply_text(
+        f"✅ Book saved to vault!\n📂 {note_path}\n\n"
+        f"📚 {note_dict['book_title']}\n"
+        f"✍️ {authors}\n📅 {year}\n"
+        f"📎 Attachment: {note_dict['attachment'] or 'none'}"
+    )
+
+
 async def analyze_and_save(update, text, detail_level, source, source_type, attachment=None):
     source_url = source if source_type == "link" else ""
     note_dict = analyze_content(text, detail_level, source_url=source_url)
@@ -140,7 +197,7 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", start_command))
-    for cmd in ("summarize", "detailed", "precise", "raw"):
+    for cmd in ("summarize", "detailed", "precise", "raw", "book"):
         app.add_handler(CommandHandler(cmd, set_detail_command))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

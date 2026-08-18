@@ -21,6 +21,8 @@ CATEGORY_MAP = {
     "bible": "Religion",
     "politics": "Politics",
     "iot": "IoT",
+    "books": "Books",
+    "book": "Books",
     "database": "Database",
     "data-analysis": "Data-Analysis",
     "data_analysis": "Data-Analysis",
@@ -48,6 +50,8 @@ def derive_detail_level(caption: Optional[str]) -> str:
         return "precise"
     if "raw" in cl:
         return "raw"
+    if "book" in cl:
+        return "book"
     return DEFAULT_DETAIL
 
 
@@ -82,6 +86,9 @@ def write_note_to_vault(note: Dict[str, Any]) -> Optional[str]:
         "tags": note.get("tags", []),
         "detail_level": note.get("detail_level", DEFAULT_DETAIL),
         "attachment": note.get("attachment", ""),
+        "book_title": note.get("book_title", ""),
+        "book_authors": note.get("book_authors", []),
+        "book_year": note.get("book_year", ""),
     }
     frontmatter_yaml = yaml.dump(frontmatter, allow_unicode=True, sort_keys=False)
     markdown_body = note.get("content", "")
