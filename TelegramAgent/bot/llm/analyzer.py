@@ -18,6 +18,16 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 DEFAULT_TEMPERATURE = 0.4
 
+
+def _safe_api_key() -> str:
+    """Return the API key or raise a clear error before any network call."""
+    key = GEMINI_API_KEY.strip()
+    if not key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is not set. Copy .env.example to .env and fill in your key."
+        )
+    return key
+
 # System prompt instructs the model to categorize + return specific JSON.
 SYSTEM_PROMPT = """
 You are an AI assistant that converts documents into structured Obsidian notes.
@@ -48,8 +58,14 @@ def analyze_content(content: str, detail: str, source_url: str = "") -> Optional
         logger.error("The 'google-genai' package is not installed.")
         return None
 
+    try:
+        api_key = _safe_api_key()
+    except RuntimeError as e:
+        logger.error(str(e))
+        return None
+
     # Create Gemini client
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=api_key)
 
     # Prepare the prompt using detail on the fly
     prompt = SYSTEM_PROMPT.format(detail_level=detail)
@@ -73,9 +89,9 @@ def analyze_content(content: str, detail: str, source_url: str = "") -> Optional
         raw_response = response.text.strip()
         # Remove any code fences if present
         if raw_response.startswith("```"):
-            # Remove the first line and the last line (Could be used)
-            lines = raw_response.split("\n")
-            raw_response = "\n".join(lines[1:])
+            # Drop the opening fence line and any trailing fence
+            raw_response = raw_response.split("\n", 1)[-1]
+            raw_response = raw_response.rstrip("`").strip()
 
         note_dict = json.loads(raw_response)
 
@@ -84,8 +100,8 @@ def analyze_content(content: str, detail: str, source_url: str = "") -> Optional
             note_dict["title"] = "Untitled"
         if "category" not in note_dict:
             note_dict["category"] = "uncategorized"
-        if "summary" not in note_dict:
-            note_dict["summary"] = ""
+        if "content" not in note_dict:
+            note_dict["content"] = note_dict.get("summary", "")
         if "tags" not in note_dict:
             note_dict["tags"] = []
 

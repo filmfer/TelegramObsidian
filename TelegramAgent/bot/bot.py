@@ -7,6 +7,7 @@ from pathlib import Path
 
 from telegram import Update
 from telegram.ext import (
+    AIORateLimiter,
     Application,
     CommandHandler,
     MessageHandler,
@@ -39,6 +40,10 @@ ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
 # Detail levels selectable via /command or caption
 DETAIL_LEVELS = {"summarize", "detailed", "precise", "raw", "book"}
 
+# Per-user cooldown (seconds) between document/link processing to prevent abuse
+USER_COOLDOWN_SECONDS = 10
+_user_last_request: dict = {}
+
 
 # ---- Command handlers ----
 
@@ -64,7 +69,26 @@ async def set_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ---- Message handlers ----
 
+def _check_rate_limit(user_id: int) -> bool:
+    """Return True if the user is allowed to proceed (cooldown elapsed)."""
+    import time
+
+    now = time.monotonic()
+    last = _user_last_request.get(user_id, 0)
+    if now - last < USER_COOLDOWN_SECONDS:
+        return False
+    _user_last_request[user_id] = now
+    return True
+
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _check_rate_limit(user_id):
+        await update.message.reply_text(
+            f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between uploads."
+        )
+        return
+
     caption = update.message.caption
     detail_level = (
         derive_detail_level(caption) if caption else context.user_data.get("detail_level", "detailed")
@@ -112,6 +136,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _check_rate_limit(user_id):
+        await update.message.reply_text(
+            f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between requests."
+        )
+        return
+
     text = update.message.text.strip()
     if text.startswith("http://") or text.startswith("https://"):
         content = await parse_link(text)
@@ -194,7 +225,12 @@ async def analyze_and_save(update, text, detail_level, source, source_type, atta
 
 def main():
     """Start the Telegram bot."""
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .rate_limiter(AIORateLimiter())
+        .build()
+    )
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", start_command))
     for cmd in ("summarize", "detailed", "precise", "raw", "book"):

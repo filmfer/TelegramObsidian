@@ -128,7 +128,8 @@ def _extract_epub_fb2(file_path: str) -> Dict[str, Any]:
 
 def _extract_fb2(file_path: str) -> Dict[str, Any]:
     """FB2 is XML; parse title/author/year from the XML structure."""
-    import xml.etree.ElementTree as ET
+    # defusedxml prevents XXE / billion-laughs entity expansion attacks
+    from defusedxml import ElementTree as ET
 
     tree = ET.parse(file_path)
     root = tree.getroot()

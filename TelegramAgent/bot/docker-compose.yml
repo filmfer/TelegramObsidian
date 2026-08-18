@@ -7,9 +7,8 @@ services:
     volumes:
       # Mount Google Drive (or NFS) so the bot writes directly to the synced Vault
       - vault:/data/vault
-    # Run behind the host's Google Drive sync so all devices stay in sync
-    ports:
-      - "8080:8080"
+    # No host ports exposed — the bot uses Telegram polling (outbound HTTPS only).
+    # This minimizes the attack surface on the VPS.
 
 volumes:
   vault:
