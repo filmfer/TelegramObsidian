@@ -1,0 +1,15 @@
+services:
+  telegram-agent:
+    build: .
+    container_name: obsidian-agent
+    restart: unless-stopped
+    env_file: ./.env
+    volumes:
+      # Mount Google Drive (or NFS) so the bot writes directly to the synced Vault
+      - vault:/data/vault
+    # Run behind the host's Google Drive sync so all devices stay in sync
+    ports:
+      - "8080:8080"
+
+volumes:
+  vault:
