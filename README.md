@@ -65,7 +65,7 @@ Gemini classifies each note into one or more of your folders: `Travel`, `Car`, `
 ### 🔄 Multi-Device Sync (Zero Data Loss)
 | Device | Sync Method |
 |---|---|
-| 🖥️ MacBook Air M2 | Google Drive for Desktop |
+| 🖥️ MacBook | Google Drive for Desktop |
 | 🖥️ Windows PC (personal) | Google Drive for Desktop |
 | 🖥️ Windows PC (work) | Google Drive for Desktop |
 | 📱 Android / iOS | DriveSync / FolderSync |
