@@ -5,10 +5,9 @@ services:
     restart: unless-stopped
     env_file: ./.env
     volumes:
-      # Mount Google Drive (or NFS) so the bot writes directly to the synced Vault
-      - vault:/data/vault
+      # Bind mount to the host folder where the Obsidian vault lives
+      # (rclone mount or a synced Google Drive directory).
+      # Default: uses the OBSIDIAN_VAULT_HOST_PATH env var from .env
+      - ${OBSIDIAN_VAULT_HOST_PATH:-/srv/obsidian-vault}:/data/vault
     # No host ports exposed — the bot uses Telegram polling (outbound HTTPS only).
     # This minimizes the attack surface on the VPS.
-
-volumes:
-  vault:

@@ -25,6 +25,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+
+# Silence noisy INFO logs from HTTP libraries (they spam every 10s polling loop)
+for _noisy in ("httpx", "httpcore", "urllib3", "asyncio"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
