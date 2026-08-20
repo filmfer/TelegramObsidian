@@ -119,8 +119,9 @@ nano .env
 # 3. Mount your Google Drive vault.
 #    Option A — Drive folder is on the VPS (rsync from your Mac):
 #       rsync -avz ~/path/to/ObsidianVault/ user@vps:/srv/obsidian-vault/
-#    Option B — Mount Google Drive via rclone (cloud mount):
-#       rclone mount gdrive:ObsidianVault /srv/obsidian-vault --vfs-cache-mode writes &
+#    Option B — Mount Google Drive via rclone (cloud mount, headless-friendly):
+#       sudo bash setup_rclone.sh
+#       (installs rclone, guides headless OAuth, creates systemd service)
 
 # 4. Build & run:
 docker compose up -d --build
@@ -129,19 +130,38 @@ docker compose up -d --build
 docker compose logs -f telegram-agent
 ```
 
+### Automated Google Drive mount (`setup_rclone.sh`)
+
+For a **headless Ubuntu server** (no browser/window manager), run the included script to mount your Google Drive vault automatically:
+
+```bash
+sudo bash setup_rclone.sh
+```
+
+It will:
+
+1. Install `rclone` + `fuse3`
+2. Create the `gdrive` remote pointing at your vault folder ID
+3. Guide you through **headless OAuth** — it prints a URL; open it in your local browser, authorize, and paste the verification code back
+4. Create the mount point `/srv/obsidian-vault`
+5. Create + enable a **systemd service** (`rclone-gdrive`) so the mount survives reboots
+
+After it finishes, set in `.env`:
+
+```ini
+OBSIDIAN_VAULT_HOST_PATH=/srv/obsidian-vault
+```
+
+Then rebuild: `docker compose up -d --build`
+
 `docker-compose.yml`:
 
 - No host ports exposed (polling only — safest)
 - `env_file: ./.env` injects secrets at runtime (never baked into the image)
-- `vault:/data/vault` named volume
+- **Bind mount** `${OBSIDIAN_VAULT_HOST_PATH:-/srv/obsidian-vault}:/data/vault` — writes directly to the Google Drive folder on the host
 - Runs as non-root user
 
-To use a bind mount instead of a named volume:
-
-```yaml
-volumes:
-  - /srv/obsidian-vault:/data/vault
-```
+The bind mount path is read from `OBSIDIAN_VAULT_HOST_PATH` in `.env` (defaults to `/srv/obsidian-vault`).
 
 ---
 
