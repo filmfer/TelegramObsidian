@@ -105,7 +105,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     with tempfile.TemporaryDirectory() as tmp:
-        local_path = await file_obj.download_to_drive(tmp)
+        file_name = update.message.document.file_name
+        destination_path = Path(tmp) / file_name
+        local_path = await file_obj.download_to_drive(custom_path=destination_path)
+        #local_path = await file_obj.download_to_drive(tmp)
         attachment_rel = _save_attachment(local_path)
 
         # --- E-BOOK ROUTE ---
