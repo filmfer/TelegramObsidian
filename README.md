@@ -155,8 +155,8 @@ One config, many brains — switch anytime from Telegram with `/models`:
 | Ollama (local) | `OLLAMA_HOST` | ♾️ unlimited | privacy, offline |
 
 ```ini
-LLM_MODEL=gemini/gemini-2.5-flash          # primary
-LLM_FALLBACKS=groq/llama-3.3-70b-versatile # auto-fallback chain
+LLM_MODEL=gemini/gemini-flash-latest          # primary (auto-tracks newest flash)
+LLM_FALLBACKS=groq/openai/gpt-oss-120b,gemini/gemini-pro-latest
 ```
 
 **Never worry about deprecations again:** the bot detects dead models,

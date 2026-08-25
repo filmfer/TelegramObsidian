@@ -23,12 +23,12 @@ CONFIG_PATH = Path(os.getenv("AGENT_CONFIG_PATH", "config.json"))
 
 # Static defaults; the weekly/startup health check replaces these
 # automatically if the configured model disappears.
-DEFAULT_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-2.5-flash")
+DEFAULT_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-flash-latest")
 DEFAULT_FALLBACKS = [
     m.strip()
     for m in os.getenv(
         "LLM_FALLBACKS",
-        "groq/llama-3.3-70b-versatile,gemini/gemini-2.0-flash",
+        "groq/openai/gpt-oss-120b,groq/llama-3.1-8b-instant,gemini/gemini-pro-latest",
     ).split(",")
     if m.strip()
 ]

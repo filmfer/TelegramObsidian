@@ -197,6 +197,24 @@ async def analyze_content(
     if note_dict is None:
         return None
 
+    # Auto-repair: some models omit the META_JSON line → recover metadata cheaply
+    if note_dict.get("title") in (None, "", "Untitled") or note_dict.get(
+        "category"
+    ) in (None, "", "uncategorized"):
+        try:
+            meta = await _extract_metadata(content)
+            if meta:
+                if note_dict.get("title", "Untitled") == "Untitled":
+                    note_dict["title"] = meta.get("title", "Untitled")
+                if note_dict.get("category", "uncategorized") == "uncategorized":
+                    note_dict["category"] = meta.get("category", "uncategorized")
+                if not note_dict.get("tags"):
+                    note_dict["tags"] = meta.get("tags", [])
+        except AllProvidersFailedError:
+            raise
+        except Exception as e:
+            logger.warning(f"Metadata recovery skipped: {e}")
+
     note_dict.setdefault("content", "")
     note_dict["detail_level"] = detail
     return note_dict
