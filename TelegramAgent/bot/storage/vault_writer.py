@@ -37,6 +37,16 @@ CATEGORY_MAP = {
     "diet": "Food",
     "food": "Food",
     "cooking": "Food",
+    "hacking": "Hacking",
+    "osint": "Hacking",
+    "pentesting": "Hacking",
+    "security": "Security",
+    "cybersecurity": "Security",
+    "technology": "Technology",
+    "tech": "Technology",
+    "linux": "Programming",
+    "python": "Programming",
+    "javascript": "Programming",
 }
 
 DEFAULT_DETAIL = "detailed"

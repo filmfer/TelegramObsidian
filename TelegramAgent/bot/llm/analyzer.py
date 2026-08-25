@@ -58,6 +58,9 @@ Rules:
 - Use ## headers exactly as shown above.
 - Skip a section ONLY if there is truly nothing for it.
 - Never invent facts that are not in the source material.
+- IMPORTANT: Your reply MUST START with this exact single line (then a blank \
+line, then the note):
+META_JSON: {"title": "...", "category": "...", "tags": ["...", "..."]}
 """
 
 PERSONAL_NOTE_EXTRA = """The user is sharing their OWN raw thought or idea written \
@@ -240,25 +243,59 @@ async def _extract_metadata(content: str) -> Optional[Dict[str, Any]]:
 
 def _parse_response(note_text: str) -> Optional[Dict[str, Any]]:
     """
-    Split the LLM reply into Markdown body + trailing META_JSON line.
-    Tolerates missing/invalid META_JSON and stray code fences.
+    Split the LLM reply into Markdown body + META_JSON metadata.
+    Robust to: JSON at start or end, code fences, missing META_JSON
+    (salvages any {...} containing "category" anywhere in the text).
     """
-    body = note_text.strip()
+    import re as _re
+
+    text = note_text.strip()
     note_dict: Dict[str, Any] = {}
+    meta_candidates = []
 
     marker = "META_JSON:"
-    if marker in body:
-        body, meta_part = body.rsplit(marker, 1)
-        body = body.strip()
-        try:
-            parsed = json.loads(meta_part.strip().strip("`"))
-            if isinstance(parsed, dict):
-                note_dict.update(parsed)
-        except json.JSONDecodeError:
-            logger.warning("Could not parse META_JSON line from model reply")
+    if marker in text:
+        _, meta_part = text.split(marker, 1)
+        meta_candidates.append(meta_part.strip().strip("`"))
+        # Body = everything before the marker line
+        head = text.split(marker, 1)[0]
+        # If marker was at position 0, head is empty → body is after JSON block
+        body_from_head = head.strip()
+    else:
+        body_from_head = None
 
-    note_dict["content"] = body
-    note_dict.setdefault("title", "Untitled")
+    # Salvage: any JSON object mentioning category/title anywhere in the text
+    for m in _re.finditer(r"\{[^{}]*\"(?:category|title)\"[^{}]*\}", text):
+        meta_candidates.append(m.group(0))
+
+    for cand in meta_candidates:
+        try:
+            parsed = json.loads(cand.strip().strip("`"))
+            if isinstance(parsed, dict) and parsed.get("title"):
+                note_dict.update(parsed)
+                break
+        except json.JSONDecodeError:
+            continue
+
+    if body_from_head:
+        note_dict["content"] = body_from_head
+    elif "content" not in note_dict:
+        # Marker was at start; drop the JSON block from the body
+        body = _re.sub(
+            r"^\s*META_JSON:\s*\{[^{}]*\}\s*", "", text
+        ).strip()
+        note_dict["content"] = body
+
+    title = note_dict.get("title") or ""
+    if not title or title.lower() == "untitled":
+        # Derive a usable title from the first markdown heading or first line
+        for line in (note_dict.get("content") or "").splitlines():
+            s = line.lstrip("# ").strip()
+            if len(s) >= 6:
+                title = s[:80]
+                break
+        note_dict["title"] = title or "Untitled"
+
     note_dict.setdefault("category", "uncategorized")
     note_dict.setdefault("tags", [])
     if isinstance(note_dict["tags"], str):
