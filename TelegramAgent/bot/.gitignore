@@ -4,3 +4,6 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Runtime agent state (chosen LLM model, cached catalogs)
+config.json

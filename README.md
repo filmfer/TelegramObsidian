@@ -1,104 +1,101 @@
-# 📚 Telegram → Gemini → Obsidian Knowledge Agent
+<div align="center">
 
-> **Turn Telegram into your personal knowledge capture pipeline.** Send documents, links, and e-books to a bot — get clean, AI-categorized Markdown notes in your Obsidian vault, synced across all your devices.
+# 🧠 BrainHarvest
+
+### Turn your Telegram into an AI-powered knowledge machine
+
+Send documents, links, e-books, voice notes & thoughts —<br/>
+get structured, searchable **Obsidian knowledge notes** powered by AI.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![Release](https://img.shields.io/badge/release-v1.0.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
-[![Telegram](https://img.shields.io/badge/Telegram-Bot-2CA5E0.svg?logo=telegram&logoColor=white)](https://telegram.org/)
-[![Gemini](https://img.shields.io/badge/Gemini-AI-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev/)
+[![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4.svg?logo=telegram&logoColor=white)](https://telegram.org/)
 [![Obsidian](https://img.shields.io/badge/Obsidian-Vault-7C3AED.svg?logo=obsidian&logoColor=white)](https://obsidian.md/)
+[![Multi-LLM](https://img.shields.io/badge/LLM-Gemini%20%7C%20Groq%20%7C%20Ollama-orange)](#-multi-provider--free)
+
+**Self-hosted** · **Zero exposed ports** · **Free-tier friendly** · **Multi-device sync**
+
+</div>
 
 ---
 
-## 🧭 What is this?
+## 🤔 Why?
 
-This is a **self-hosted Telegram bot** that acts as a bridge between your chat and your **Obsidian knowledge base**. You send it a file or a link, and it:
+Your best ideas and readings are scattered across chats, browser tabs and PDFs.
+**BrainHarvest** sits in your Telegram and turns *anything* you throw at it into a
+clean, categorized, interconnected note in your [Obsidian](https://obsidian.md/) vault —
+your personal **second brain**, synced to every device you own.
 
-1. **Extracts** the content (PDF, DOCX, XLSX, TXT, JSON, MD, CSV, EML, or a webpage)
-2. **Analyzes** it with **Google Gemini** — classifies it into your categories, generates a title, tags, and a structured summary
-3. **Writes** a clean Markdown note with YAML frontmatter into your Obsidian vault
-4. **Syncs** it to all your devices via Google Drive + Git (no conflicts, no data loss)
-
-It's like having a **personal research assistant** that files everything for you.
+```
+You → Telegram → 🧠 AI → Obsidian Vault → all your devices
+```
 
 ---
 
 ## ✨ Features
 
-### 📄 Document Ingestion
-| Format | Extension |
+### 📥 What you can send
+
+| | Input | What happens |
+|---|---|---|
+| 📄 | PDF · DOCX · XLSX · TXT · MD · JSON · CSV | Full-text extraction → knowledge note |
+| 🔗 | Any web link | Content scraped (SSRF-safe) → knowledge note |
+| 📖 | E-books: EPUB · MOBI · AZW·AZW3·AZW4 · DJVU · FB2 · LIT | Title / author / year extracted + file attached |
+| 📧 | Email files (`.eml`) | Parsed → knowledge note |
+| 💭 | **Plain text thoughts** | Cleaned, structured & categorized by AI |
+| 🗣️ | Voice notes *(roadmap)* | Transcribed → knowledge note |
+| 🎬 | Video links & uploads *(roadmap)* | Transcript → summary + categories |
+
+### 🎚️ Detail levels — you control the depth
+
+Send with a caption or `/command`:
+
+| Command | Output |
 |---|---|
-| PDF | `.pdf` |
-| Word | `.docx` |
-| Excel | `.xlsx` |
-| Plain text | `.txt`, `.md`, `.json`, `.csv` |
-| Email | `.eml` |
+| `/summarize` | Quick-reference overview |
+| `/detailed` ⭐ | **Full study note**: Overview · Key Concepts · Facts & Data · Insights · Open Questions |
+| `/precise` | Exact data extraction — every number preserved |
+| `/raw` | Verbatim text, metadata only |
+| `/book` | Book mode: title, author(s), year + file attached |
 
-### 🔗 Link Scraping
-Paste any `https://` URL — the bot fetches the page, extracts the main content, and summarizes it. **SSRF-protected** (blocks private/reserved IP ranges).
+### 🗂️ Automatic organization
 
-### 📖 E-Book Support
-| Format | Extension |
-|---|---|
-| PDF | `.pdf` |
-| EPUB | `.epub` |
-| Kindle | `.mobi`, `.azw`, `.azw3`, `.azw4` |
-| Other | `.djvu`, `.fb2`, `.lit` |
+AI classifies every note into your vault folders:
+`Travel` · `Car` · `Finance` · `Programming` · `AI` · `Religion` · `Politics` · `IoT` · `Database` · `Food` · `Books`… — fully customizable.
 
-The `book` detail level extracts **title, author(s), publish year** and attaches the original file to the note.
+### 🔄 Multi-device sync without conflicts
 
-### 🎚️ Detail Levels
-Control how deep the AI goes — via caption keyword or `/command`:
+Google Drive keeps your vault available everywhere; a Git repo inside it makes
+conflicts *detectable* instead of silently destructive:
 
-| Level | Output |
-|---|---|
-| `/summarize` | 3–8 bullet points |
-| `/detailed` | Full structured Markdown with subheadings |
-| `/precise` | Exact data, numbers, quotes, specs |
-| `/raw` | Original text verbatim |
-| `/book` | Book metadata + full text + attachment |
-
-### 🗂️ Multi-Label Categorization
-Gemini classifies each note into one or more of your folders: `Travel`, `Car`, `Finance`, `Programming`, `AI`, `Religion`, `Politics`, `IoT`, `Database`, `Food`, `Books`… New categories are easy to add.
-
-### 🔄 Multi-Device Sync (Zero Data Loss)
-| Device | Sync Method |
+| Device | Sync |
 |---|---|
 | 🖥️ MacBook | Google Drive for Desktop |
-| 🖥️ Windows PC (personal) | Google Drive for Desktop |
-| 🖥️ Windows PC (work) | Google Drive for Desktop |
-| 📱 Android / iOS | DriveSync / FolderSync |
-| 🔁 All devices | **Obsidian Git plugin** (auto-commit + push) |
-
-Git inside the vault prevents silent overwrite conflicts — two devices editing the same file produce a Git-detectable conflict instead of Google Drive's "file (1)" duplication.
-
-### 🛡️ Security-First Design
-- 🔐 Secrets only via `.env` — never hardcoded, never in the Docker image
-- 🚫 **SSRF protection** — blocks private/reserved IP ranges in the link parser
-- 🧱 **Path traversal protection** — vault writer sanitizes folder/file names
-- 🧬 **XXE-safe XML** — `defusedxml` for FB2 parsing
-- ⏱️ **Rate limiting** — per-user cooldown + Telegram `AIORateLimiter`
-- 🚪 **No exposed ports** — outbound HTTPS polling only
-- 👤 **Non-root Docker** — runs as `appuser`
+| 🖥️ Windows PCs | Google Drive for Desktop |
+| 📱 Android | DriveSync / FolderSync |
+| 🔁 Versioning | Obsidian Git plugin |
 
 ---
 
 ## 🏗️ Architecture
 
+```mermaid
+flowchart LR
+    A[📱 Telegram] -->|polling| B[🤖 bot.py]
+    B --> C[parsers<br/>docs · links · books]
+    C --> D{🧠 Multi-LLM<br/>fallback chain}
+    D --> E[Gemini]
+    D --> F[Groq]
+    D --> G[OpenRouter / Ollama]
+    D --> H[📝 vault_writer<br/>sanitized paths + YAML frontmatter]
+    H --> I[(📁 ObsidianVault<br/>Google Drive)]
 ```
-Telegram ──▶ python-telegram-bot (polling)
-                │
-                ├── parsers/document_parser.py   (PDF/DOCX/XLSX/TXT/JSON/MD/CSV/EML)
-                ├── parsers/link_parser.py       (web scraping, SSRF-safe)
-                ├── parsers/book_parser.py       (e-book metadata + text)
-                │
-                ▼
-            llm/analyzer.py  ──▶ Google Gemini (classify + summarize)
-                │
-                ▼
-            storage/vault_writer.py  ──▶ ObsidianVault/ (on Google Drive)
-```
+
+**Resilience built in:** if a model is deprecated or down, the fallback chain kicks in,
+the bot alerts you on Telegram and offers a live menu of working models — tap to switch.
+A weekly health check auto-updates the catalog.
 
 ---
 
@@ -108,107 +105,118 @@ Telegram ──▶ python-telegram-bot (polling)
 
 ```bash
 cd TelegramAgent/bot
-python3 -m venv .venv
-source .venv/bin/activate        # macOS/Linux
-# .venv\Scripts\activate         # Windows
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env             # fill in TELEGRAM_BOT_TOKEN + GEMINI_API_KEY
-export $(grep -v '^#' .env | xargs)
+cp .env.example .env        # add TELEGRAM_BOT_TOKEN + one LLM API key
 python bot.py
 ```
 
-### Docker (Oracle Free VPS)
+### 🐳 Docker (headless VPS)
 
 ```bash
-git clone <your-repo-url> telegram-agent && cd telegram-agent/TelegramAgent/bot
+git clone https://github.com/filmfer/TelegramObsidian.git && cd TelegramObsidian/TelegramAgent/bot
 cp .env.example .env && nano .env
+sudo bash setup_rclone.sh   # mounts your Google Drive vault (headless OAuth)
 docker compose up -d --build
-docker compose logs -f telegram-agent
 ```
 
-### Test (no API key needed)
+### ✅ Verify (no API key needed)
 
 ```bash
-cd TelegramAgent/bot
-OBSIDIAN_VAULT_PATH=../../ObsidianVault .venv/bin/python -m tests.test_pipeline
+OBSIDIAN_VAULT_PATH=../../ObsidianVault python -m tests.test_pipeline
 ```
 
+<details>
+<summary><b>🔧 Full setup walkthrough</b></summary>
+
+1. **Telegram token** — chat with [@BotFather](https://t.me/BotFather) → `/newbot`
+2. **LLM key(s)** — pick any (all have free tiers):
+   - [Google AI Studio](https://aistudio.google.com/apikey) → `GEMINI_API_KEY`
+   - [Groq Console](https://console.groq.com) → `GROQ_API_KEY` (fastest free tier)
+   - [OpenRouter](https://openrouter.ai/keys) → `OPENROUTER_API_KEY` (`:free` models)
+3. **Chat ID** — message your bot once, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy `message.chat.id` → `TELEGRAM_CHAT_ID`
+4. **Vault path** — point `OBSIDIAN_VAULT_HOST_PATH` at your Drive-mounted folder
+5. `docker compose up -d --build` and start sending content!
+
+</details>
+
 ---
 
-## 📖 Usage
+## 🧠 Multi-Provider & Free 💰
 
-| Command | Action |
-|---|---|
-| `/start` | Help message |
-| `/summarize` `/detailed` `/precise` `/raw` `/book` | Set default detail level |
-| *(send doc + caption)* | Process at that detail level |
-| *(send e-book)* | Auto-detected → book note with metadata + attachment |
-| *(paste URL)* | Scrape + summarize the page |
+One config, many brains — switch anytime from Telegram with `/models`:
 
-### Example book note
+| Provider | Env var | Free tier | Best for |
+|---|---|---|---|
+| Google Gemini | `GEMINI_API_KEY` | ✅ Flash models, 500+ req/day | default; long context |
+| Groq | `GROQ_API_KEY` | ✅ very fast | summaries, audio transcription |
+| OpenRouter | `OPENROUTER_API_KEY` | ✅ `:free` models | variety |
+| Ollama (local) | `OLLAMA_HOST` | ♾️ unlimited | privacy, offline |
 
-```yaml
----
-title: "The Pragmatic Programmer"
-source_type: book
-book_title: "The Pragmatic Programmer"
-book_authors: [Andrew Hunt, David Thomas]
-book_year: "1999"
-attachment: 90_Attachments/the-pragmatic-programmer.epub
-detail_level: book
----
+```ini
+LLM_MODEL=gemini/gemini-2.5-flash          # primary
+LLM_FALLBACKS=groq/llama-3.3-70b-versatile # auto-fallback chain
 ```
 
----
-
-## 📁 Vault Structure
-
-```
-ObsidianVault/
-├── .obsidian/              # Obsidian config (Git plugin, Dataview, QuickAdd)
-├── 00_Inbox/               # Uncategorized notes
-├── 10_Categories/          # One folder per AI category
-│   ├── Travel/
-│   ├── Car/
-│   ├── Finance/
-│   ├── Programming/
-│   ├── AI/
-│   ├── Religion/
-│   ├── Books/
-│   └── ...
-├── 90_Attachments/         # Original documents (PDFs, e-books, etc.)
-└── 99_Templates/           # Note templates
-```
+**Never worry about deprecations again:** the bot detects dead models,
+auto-switches to the best free alternative, and notifies you — weekly checks included.
 
 ---
 
-## 🧰 Tech Stack
+## 🗺️ Roadmap
 
-| Component | Technology |
-|---|---|
-| Bot framework | `python-telegram-bot` v21 (async) |
-| AI | Google Gemini (`google-genai`) |
-| PDF | `pypdf` |
-| DOCX | `python-docx` |
-| XLSX | `openpyxl` |
-| Web scraping | `trafilatura` + `httpx` |
-| E-books | `ebooklib` |
-| XML safety | `defusedxml` |
-| Deployment | Docker + docker-compose |
+- [x] v1.0 — Documents · links · e-books · multi-category vault · Docker deploy
+- [x] v1.1 — Multi-provider LLM · `/models` live switching · weekly health checks · text notes · knowledge-note format
+- [ ] Voice notes → Whisper transcription → notes
+- [ ] `/research <topic>` — deep web research with cited sources
+- [ ] YouTube/video links → transcript summaries
+- [ ] Chapter-aware book pipeline (per-chapter study notes)
+- [ ] Scraper fallback chain (cloudscraper / headless fallback)
 
 ---
+
+## 🔐 Security
+
+Zero-trust by design: no inbound ports (outbound polling only) · SSRF-blocked link fetching
+· path-traversal-safe vault writes · XXE-hardened XML parsing · per-user rate limiting ·
+non-root container · secrets only via env vars. See the [security table](TelegramAgent/bot/README.md#security).
+
+---
+
+## ❓ FAQ
+
+<details>
+<summary><b>Does Telegram need to reach my server?</b></summary>
+No. The bot uses outbound long-polling — nothing is exposed to the internet.
+</details>
+
+<details>
+<summary><b>What does it cost to run?</b></summary>
+Oracle Cloud free VPS ($0) + Gemini/Groq free tiers ($0). The bot defaults to
+free-tier models with automatic fallback.
+</details>
+
+<details>
+<summary><b>Can I lose notes from device sync conflicts?</b></summary>
+The Git repo inside the vault turns silent Google Drive overwrites into visible,
+recoverable Git states.
+</details>
+
+---
+
+## 🤝 Contributing
+
+Issues and PRs welcome! Work happens on the `develop` branch — `main` holds the stable release.
 
 ## 📄 License
 
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[MIT](LICENSE) © Filipe Ferreira
 
 ---
 
-## 🙏 Acknowledgements
+<div align="center">
+<sub>Built with ☕ and an unreasonable amount of curiosity.</sub>
+</div>
 
-- [Obsidian](https://obsidian.md/) — the knowledge base that makes this worthwhile
-- [Google Gemini](https://ai.google.dev/) — the AI brain
-- [python-telegram-bot](https://python-telegram-bot.org/) — the bot framework
-- [trafilatura](https://trafilatura.readthedocs.io/) — web content extraction
+</content>
+</invoke>
