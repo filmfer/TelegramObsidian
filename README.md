@@ -213,7 +213,7 @@ Issues and PRs welcome! Work happens on the `develop` branch — `main` holds th
 
 ## 📄 License
 
-[MIT](LICENSE) © Filipe Ferreira
+[MIT](LICENSE) © Filipe Fernandes
 
 ---
 
