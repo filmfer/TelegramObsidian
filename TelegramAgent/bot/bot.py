@@ -28,10 +28,18 @@ from parsers.book_parser import (
 )
 from parsers.audio_parser import TranscriptionError, transcribe_audio
 from parsers.search_parser import search_web
+from parsers.video_parser import (
+    extract_audio_track,
+    extract_youtube_id,
+    fetch_youtube_metadata,
+    fetch_youtube_transcript,
+    is_youtube_url,
+)
 from llm.analyzer import (
     BOOK_FINAL_PROMPT,
     BOOK_SECTION_PROMPT,
     RESEARCH_PROMPT,
+    VIDEO_PROMPT,
     CATEGORIES,
     _parse_response,
     analyze_content,
@@ -237,6 +245,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if text.startswith(("http://", "https://")):
+        if is_youtube_url(text):
+            await _process_youtube(update, context, text)
+            return
         content = await parse_link(text)
         if not content:
             await update.message.reply_text(
@@ -361,6 +372,103 @@ async def _research_topic(update, context, topic, status):
     await status.edit_text(
         f"🔎 Research saved!\n📂 {note_path}\n📝 {note_dict.get('title')}",
         disable_web_page_preview=True,
+    )
+
+
+# ---- Video handling (#5) ----
+
+async def _process_youtube(update, context, url):
+    """YouTube link → free caption transcript → knowledge note with video info."""
+    video_id = extract_youtube_id(url) or ""
+    detail = context.user_data.get("detail_level") or "summarize"
+    status = await update.message.reply_text("🎬 Fetching video transcript…")
+
+    meta, transcript = {}, None
+    if video_id:
+        meta = await asyncio.to_thread(fetch_youtube_metadata, video_id)
+        transcript = await asyncio.to_thread(fetch_youtube_transcript, video_id)
+
+    if not transcript:
+        await status.edit_text(
+            "❌ No transcript available for this video (captions may be disabled).\n"
+            "Tip: upload the video file here and I'll transcribe the audio instead."
+        )
+        return
+
+    title = meta.get("title") or f"Video {video_id}"
+    author = meta.get("author", "")
+    await status.edit_text(f"🧠 Summarizing “{title[:60]}”…")
+
+    payload = (
+        f"Video URL: {url}\nTitle: {title}\nChannel: {author}\n\n"
+        f"Transcript:\n{transcript[:50000]}"
+    )
+    note_dict = _parse_response(await chat(VIDEO_PROMPT.format(categories=CATEGORIES), payload, max_tokens=6000))
+    if not note_dict:
+        await status.edit_text("❌ Video summarization failed.")
+        return
+
+    tags = note_dict.get("tags", [])
+    if "video" not in tags:
+        tags.insert(0, "video")
+    note_dict.update(
+        {
+            "tags": tags,
+            "source": url,
+            "source_type": "video",
+            "detail_level": detail,
+            "content": f"🔗 {url}\n📺 {title}" + (f" — {author}" if author else "") + f"\n\n{note_dict.get('content','')}",
+        }
+    )
+
+    note_path = write_note_to_vault(note_dict)
+    if not note_path:
+        await status.edit_text("❌ Could not write to Obsidian vault.")
+        return
+    await status.edit_text(f"🎬 Video note saved!\n📂 {note_path}\n📝 {note_dict.get('title')}", disable_web_page_preview=True)
+
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Uploaded video → ffmpeg extracts audio → Groq Whisper → knowledge note."""
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _check_rate_limit(user_id):
+        await update.message.reply_text(f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between requests.")
+        return
+
+    video = update.message.video or update.message.document
+    size_mb = (video.file_size or 0) / (1024 * 1024)
+    if size_mb > 20:
+        await update.message.reply_text(
+            f"❌ This video is {size_mb:.0f}MB — Telegram's Bot API only allows downloads up to 20MB.\n"
+            "Tip: compress it, or send a platform link (YouTube etc.) instead."
+        )
+        return
+
+    status = await update.message.reply_text("🎬 Downloading & extracting audio track…")
+    with tempfile.TemporaryDirectory() as tmp:
+        file_obj = await video.get_file()
+        local_path = await file_obj.download_to_drive(tmp)
+        out_mp3 = str(Path(tmp) / "audio.mp3")
+        try:
+            await asyncio.to_thread(extract_audio_track, local_path, out_mp3)
+        except RuntimeError as e:
+            await status.edit_text(f"❌ {e}")
+            return
+        try:
+            transcript = await transcribe_audio(out_mp3)
+        except TranscriptionError as e:
+            await status.edit_text(f"❌ Transcription failed: {e}")
+            return
+
+    caption = (update.message.caption or "").strip()
+    detail = derive_detail_level(caption) if caption else context.user_data.get("detail_level", "detailed")
+
+    await status.edit_text("🧠 Summarizing video content…")
+    await analyze_and_save(
+        update, context, transcript[:40000], detail,
+        source=f"telegram-video::{Path(local_path).name}",
+        source_type="video",
+        source_kind="document",
     )
 
 
@@ -597,6 +705,9 @@ def main():
     app.add_handler(CallbackQueryHandler(model_choice_callback, pattern=r"^swm:\d+$"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    app.add_handler(
+        MessageHandler(filters.VIDEO | (filters.Document.VIDEO & filters.Document.ALL), handle_video)
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logger.info("Bot started. Current LLM model: %s", get_current_model())
     app.run_polling()

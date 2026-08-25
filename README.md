@@ -41,7 +41,8 @@ You → Telegram → 🧠 AI → Obsidian Vault → all your devices
 | | Input | What happens |
 |---|---|---|
 | 📄 | PDF · DOCX · XLSX · TXT · MD · JSON · CSV | Full-text extraction → knowledge note |
-| 🔗 | Any web link | Content scraped (SSRF-safe) → knowledge note |
+| 🔗 | Any web link | 3-layer scraping chain (headers → cloudscraper → jina.ai), SSRF-safe |
+| 🎬 | YouTube / video links | Free caption transcript → summary note with video info |
 | 📖 | E-books: EPUB · MOBI · AZW·AZW3·AZW4 · DJVU · FB2 · LIT | Title / author / year extracted + file attached |
 | 📧 | Email files (`.eml`) | Parsed → knowledge note |
 | 💭 | **Plain text thoughts** | Cleaned, structured & categorized by AI |
@@ -169,6 +170,8 @@ auto-switches to the best free alternative, and notifies you — weekly checks i
 - [x] v1.1 — Multi-provider LLM · `/models` live switching · weekly health checks · text notes · knowledge-note format
 - [x] Voice notes → free Whisper transcription (Groq) → notes; caption `research` = deep search
 - [x] `/research <topic>` — DuckDuckGo + scrape top sources + cited synthesis
+- [x] YouTube/video links → transcript summaries; uploaded videos (≤20MB) → ffmpeg + Whisper
+- [x] Scraper fallback chain: browser headers → cloudscraper → jina.ai
 - [ ] YouTube/video links → transcript summaries
 - [x] Chapter-aware book pipeline: TOC/index stripped → map-reduce over sections → background processing with live progress
 - [ ] Scraper fallback chain (cloudscraper / headless fallback)

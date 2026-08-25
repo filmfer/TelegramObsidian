@@ -141,6 +141,25 @@ reading the whole book — completeness matters more than brevity. End with:
 META_JSON: {{"title": "{book_title} — Study Notes", "category": "books", "tags": ["book", "...3-6 topic tags"]}}
 """
 
+VIDEO_PROMPT = """You are given the transcript of a video. Create a study note \
+so the user can learn from it without watching:
+
+## 📌 Video Overview
+(what the video covers, style/audience)
+
+## 🔑 Key Points
+(the substance, in order — explained, not just listed)
+
+## 📊 Facts & Data
+(numbers, tools, commands, names mentioned)
+
+## 💡 Takeaways
+(actionable lessons)
+
+End with:
+META_JSON: {{"title": "🎬 <video title or topic>", "category": "best fit from: {categories}", "tags": ["video", "..."]}}
+"""
+
 
 # ------------------------------------------------------------ main entry ---
 

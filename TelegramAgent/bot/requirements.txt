@@ -14,3 +14,5 @@ ebooklib==0.18
 lxml==6.1.1
 defusedxml==0.7.1
 ddgs==9.8.0
+cloudscraper==1.2.71
+youtube-transcript-api==1.2.4

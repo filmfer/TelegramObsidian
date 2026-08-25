@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import socket
@@ -47,10 +48,9 @@ def _is_blocked(host: str) -> bool:
 async def parse_link(url: str) -> str | None:
     """
     Extract readable content from a public URL.
-    Returns plain text content, or None on failure.
+    Layered fallback: httpx+headers → cloudscraper → Jina Reader.
     SSRF-safe: blocks private/reserved IP ranges.
     """
-    # Basic URL validation
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         logger.warning(f"Unsupported URL scheme: {url}")
@@ -58,28 +58,87 @@ async def parse_link(url: str) -> str | None:
     if not parsed.hostname:
         logger.warning(f"Missing hostname: {url}")
         return None
-
-    # SSRF protection: refuse private / reserved targets
     if _is_blocked(parsed.hostname):
         return None
 
-    # Fetch the HTML
+    # Layer 1 + 2: fetch HTML, then extract main content
+    html = await _fetch_httpx(url) or await _fetch_cloudscraper(url)
+    if html:
+        try:
+            text = extract(html)
+            if text and text.strip():
+                logger.info(f"Scraped {url} ({len(text)} chars)")
+                return text.strip()
+        except Exception as e:
+            logger.error(f"trafilatura extraction failed for {url}: {e}")
+
+    # Layer 3: Jina Reader — renders JS, bypasses most blocks, returns markdown
+    md = await _fetch_jina(url)
+    if md:
+        return md.strip()
+    return None
+
+
+async def _fetch_httpx(url: str) -> str | None:
+    """Plain HTTP fetch with realistic browser headers."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.9,pt;q=0.8",
+    }
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
             response = await client.get(url)
             response.raise_for_status()
-            html_content = response.text
+            return response.text
     except Exception as e:
-        logger.error(f"Failed to fetch URL: {e}")
+        logger.info(f"httpx fetch failed for {url}: {e}")
         return None
 
-    # Use trafilatura to extract main content from HTML
+
+async def _fetch_cloudscraper(url: str) -> str | None:
+    """Cloudflare-protected sites — cloudscraper solves JS challenges (sync)."""
     try:
-        extracted_text = extract(html_content)
-        if not extracted_text:
-            logger.warning("No extractable content found on page.")
-            return None
-        return extracted_text.strip()
+        import cloudscraper
+
+        def _get():
+            s = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "darwin", "desktop": True}
+            )
+            r = s.get(url, timeout=45)
+            r.raise_for_status()
+            return r.text
+
+        html = await asyncio.to_thread(_get)
+        logger.info(f"cloudscraper fetched {url} ({len(html)} chars)")
+        return html
+    except ImportError:
+        logger.debug("cloudscraper not installed — skipping layer 2")
+        return None
     except Exception as e:
-        logger.error(f"Failed to extract content: {e}")
+        logger.info(f"cloudscraper failed for {url}: {e}")
+        return None
+
+
+async def _fetch_jina(url: str) -> str | None:
+    """Jina Reader (r.jina.ai): renders JS and returns clean markdown."""
+    try:
+        async with httpx.AsyncClient(timeout=90, follow_redirects=True) as client:
+            r = await client.get(f"https://r.jina.ai/{url}")
+            r.raise_for_status()
+            text = r.text
+            # Skip Google login-wall responses
+            if "sign in to continue" in text.lower()[:500]:
+                logger.info(f"Jina returned a login wall for {url}")
+                return None
+            logger.info(f"jina.ai fetched {url} ({len(text)} chars)")
+            return text
+    except Exception as e:
+        logger.info(f"jina.ai failed for {url}: {e}")
         return None
