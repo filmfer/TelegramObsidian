@@ -45,7 +45,7 @@ You → Telegram → 🧠 AI → Obsidian Vault → all your devices
 | 📖 | E-books: EPUB · MOBI · AZW·AZW3·AZW4 · DJVU · FB2 · LIT | Title / author / year extracted + file attached |
 | 📧 | Email files (`.eml`) | Parsed → knowledge note |
 | 💭 | **Plain text thoughts** | Cleaned, structured & categorized by AI |
-| 🗣️ | Voice notes *(roadmap)* | Transcribed → knowledge note |
+| 🗣️ | Voice notes (`.ogg` / audio files) | Free Whisper transcription → knowledge note · caption `research` = deep search |
 | 🎬 | Video links & uploads *(roadmap)* | Transcript → summary + categories |
 
 ### 🎚️ Detail levels — you control the depth
@@ -167,10 +167,10 @@ auto-switches to the best free alternative, and notifies you — weekly checks i
 
 - [x] v1.0 — Documents · links · e-books · multi-category vault · Docker deploy
 - [x] v1.1 — Multi-provider LLM · `/models` live switching · weekly health checks · text notes · knowledge-note format
-- [ ] Voice notes → Whisper transcription → notes
-- [ ] `/research <topic>` — deep web research with cited sources
+- [x] Voice notes → free Whisper transcription (Groq) → notes; caption `research` = deep search
+- [x] `/research <topic>` — DuckDuckGo + scrape top sources + cited synthesis
 - [ ] YouTube/video links → transcript summaries
-- [ ] Chapter-aware book pipeline (per-chapter study notes)
+- [x] Chapter-aware book pipeline: TOC/index stripped → map-reduce over sections → background processing with live progress
 - [ ] Scraper fallback chain (cloudscraper / headless fallback)
 
 ---

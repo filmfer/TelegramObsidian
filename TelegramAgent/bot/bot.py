@@ -1,4 +1,5 @@
 """Telegram → Gemini → Obsidian Knowledge Agent."""
+import asyncio
 import logging
 import os
 import shutil
@@ -19,8 +20,23 @@ from telegram.ext import (
 
 from parsers.document_parser import parse_document
 from parsers.link_parser import parse_link
-from parsers.book_parser import extract_book_metadata, is_book_file
-from llm.analyzer import analyze_content
+from parsers.book_parser import (
+    clean_book_text,
+    extract_book_metadata,
+    is_book_file,
+    split_into_chunks,
+)
+from parsers.audio_parser import TranscriptionError, transcribe_audio
+from parsers.search_parser import search_web
+from llm.analyzer import (
+    BOOK_FINAL_PROMPT,
+    BOOK_SECTION_PROMPT,
+    RESEARCH_PROMPT,
+    CATEGORIES,
+    _parse_response,
+    analyze_content,
+)
+from llm.provider import chat
 from llm.provider import (
     AllProvidersFailedError,
     _free_score,
@@ -70,9 +86,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 Obsidian Knowledge Agent ready.\n\n"
         "Send me:\n"
         "• Documents (PDF/DOCX/XLSX/TXT/JSON/MD/CSV/EML)\n"
-        "• E-books (EPUB/MOBI/AZW/DJVU/FB2/LIT) — or caption 'book'\n"
+        "• E-books (EPUB/MOBI/AZW/DJVU/FB2/LIT) → deep study notes\n"
         "• Links (https://…)\n"
-        "• Plain text thoughts — I'll structure & categorize them\n\n"
+        "• Plain text thoughts — structured & categorized by AI\n"
+        "• Voice messages 🎙️ — transcribed into notes\n\n"
+        "/research <topic> — deep web research, cited sources\n"
         "Detail levels: /summarize /detailed /precise /raw /book\n"
         "LLM models: /models"
     )
@@ -180,6 +198,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await _save_book_note(
                 update,
+                context,
                 book_meta,
                 detail_level=detail_level,
                 source=f"telegram-book::{Path(local_path).name}",
@@ -242,6 +261,109 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ---- Voice notes (#4) ----
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Transcribe Telegram voice/audio via free Groq Whisper, then note it."""
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _check_rate_limit(user_id):
+        await update.message.reply_text(
+            f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between requests."
+        )
+        return
+
+    media = update.message.voice or update.message.audio
+    status = await update.message.reply_text("🎙️ Transcribing audio…")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        file_obj = await media.get_file()
+        local_path = await file_obj.download_to_drive(tmp)
+        try:
+            transcript = await transcribe_audio(local_path)
+        except TranscriptionError as e:
+            await status.edit_text(f"❌ Transcription failed: {e}")
+            return
+
+    caption = (update.message.caption or "").strip()
+    want_research = "research" in caption.lower()
+    detail = derive_detail_level(caption) if caption else context.user_data.get("detail_level", "detailed")
+
+    preview = transcript[:300] + ("…" if len(transcript) > 300 else "")
+    await status.edit_text(f"🎙️ Transcribed:\n\n{preview}\n\n✍️ Creating your note…")
+
+    if want_research:
+        await _research_topic(update, context, transcript[:500], status)
+        return
+
+    await analyze_and_save(
+        update, context, transcript, detail,
+        source="telegram-voice::transcription",
+        source_type="voice",
+        source_kind="text",
+    )
+
+
+# ---- Deep research (#2) ----
+
+async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/research <topic> — web search + synthesis into a cited study note."""
+    topic = " ".join(context.args).strip()
+    if not topic:
+        await update.message.reply_text(
+            "Usage: /research <topic>\nExample: /research best linux hardening practices 2026"
+        )
+        return
+    status = await update.message.reply_text(f"🔎 Researching “{topic}”…")
+    await _research_topic(update, context, topic, status)
+
+
+async def _research_topic(update, context, topic, status):
+    """Search web → scrape top sources → LLM synthesis → cited note."""
+    results = await asyncio.to_thread(search_web, topic, 5)
+    if not results:
+        await status.edit_text("❌ No search results found for this topic.")
+        return
+
+    sources_payload = []
+    for r in results[:4]:
+        title = r.get("title") or r.get("url", "")[:60]
+        try:
+            await status.edit_text(f"🔎 Reading: {title[:60]}…")
+            content = await parse_link(r["url"]) or ""
+        except Exception:
+            content = ""
+        body = content[:5000] or f"(snippet) {r.get('snippet', '')}"
+        sources_payload.append(f"### Source: {title}\nURL: {r['url']}\n\n{body}")
+
+    prompt = RESEARCH_PROMPT.format(topic=topic, categories=CATEGORIES)
+    payload = "\n\n---\n\n".join(sources_payload)
+
+    await status.edit_text("🧠 Synthesizing research…")
+    note_text = await chat(prompt, payload, max_tokens=6000)
+
+    note_dict = _parse_response(note_text)
+    if not note_dict:
+        await status.edit_text("❌ Research synthesis failed.")
+        return
+
+    tags = note_dict.get("tags", [])
+    if "research" not in tags:
+        tags.insert(0, "research")
+    note_dict["tags"] = tags
+    note_dict["source"] = f"research::{topic}"
+    note_dict["source_type"] = "research"
+    note_dict["detail_level"] = "detailed"
+
+    note_path = write_note_to_vault(note_dict)
+    if not note_path:
+        await status.edit_text("❌ Could not write to Obsidian vault.")
+        return
+    await status.edit_text(
+        f"🔎 Research saved!\n📂 {note_path}\n📝 {note_dict.get('title')}",
+        disable_web_page_preview=True,
+    )
+
+
 # ---- Helpers ----
 
 def _save_attachment(local_path: str):
@@ -255,35 +377,105 @@ def _save_attachment(local_path: str):
         return None
 
 
-async def _save_book_note(update, book_meta, detail_level="book", source="", attachment=None):
-    """Create a note that carries the extracted book metadata."""
-    note_dict = {
-        "title": book_meta.get("title", "Untitled Book"),
-        "category": "books",
-        "content": book_meta.get("text", "")[:20000] or "_(No extractable text.)_",
-        "tags": ["book"],
-        "source": source,
-        "source_type": "book",
-        "attachment": attachment,
-        "detail_level": detail_level,
-        "book_title": book_meta.get("title", ""),
-        "book_authors": book_meta.get("authors", []),
-        "book_year": book_meta.get("year", ""),
-    }
-
-    note_path = write_note_to_vault(note_dict)
-    if not note_path:
-        await update.message.reply_text("❌ Could not write to Obsidian vault.")
-        return
-
-    authors = ", ".join(note_dict["book_authors"]) or "Unknown"
-    year = note_dict["book_year"] or "Unknown"
-    await update.message.reply_text(
-        f"✅ Book saved to vault!\n📂 {note_path}\n\n"
-        f"📚 {note_dict['book_title']}\n"
-        f"✍️ {authors}\n📅 {year}\n"
-        f"📎 Attachment: {note_dict['attachment'] or 'none'}"
+async def _save_book_note(update, context, book_meta, detail_level="book", source="", attachment=None):
+    """Launch background deep-processing of an e-book (map-reduce over sections)."""
+    title = book_meta.get("title") or "Untitled Book"
+    status = await update.message.reply_text(
+        f"📖 Starting deep processing of “{title}”…\n"
+        f"This runs in the background — I'll keep you updated here."
     )
+    asyncio.create_task(
+        _process_book_task(update, book_meta, detail_level, source, attachment, status)
+    )
+
+
+async def _process_book_task(update, book_meta, detail_level, source, attachment, status):
+    """
+    Map-reduce study-note pipeline:
+      clean → split into section-sized chunks → extract knowledge per chunk
+      (map) → merge into one comprehensive study note (reduce).
+    Uses free-tier models; progress is edited into the status message.
+    """
+    title = book_meta.get("title") or "Untitled Book"
+    authors = ", ".join(book_meta.get("authors", [])) or "Unknown"
+    try:
+        raw = clean_book_text(book_meta.get("text", ""))
+        if len(raw) < 500:
+            await status.edit_text(
+                "❌ Not enough extractable text in this book to build a note.\n"
+                "The original file is still saved in 90_Attachments/."
+            )
+            return
+
+        chunks = split_into_chunks(raw)[:40]  # safety cap for very large books
+        total = len(chunks)
+        logger.info(f"Book '{title}': {len(raw)} chars → {total} sections")
+
+        extractions = []
+        for i, chunk in enumerate(chunks, 1):
+            prompt = BOOK_SECTION_PROMPT.format(
+                section_num=i, total=total, book_title=title, authors=authors
+            )
+            extractions.append(f"## Section {i}\n{await chat(prompt, chunk, max_tokens=2500)}")
+            if i % 2 == 0 or i == total:
+                try:
+                    await status.edit_text(
+                        f"📖 Processing “{title}”\n🧠 Extracting knowledge — section {i}/{total}…"
+                    )
+                except Exception:
+                    pass  # message may be identical; ignore edit errors
+            await asyncio.sleep(0.5)  # be polite to free-tier rate limits
+
+        await status.edit_text(f"📚 Merging {total} sections into your study note…")
+        final_prompt = BOOK_FINAL_PROMPT.format(book_title=title, authors=authors)
+        merged = "\n\n".join(extractions)
+        final_note = await chat(final_prompt, merged[-100000:], max_tokens=8000)
+
+        note_dict = _parse_response(final_note)
+        if not note_dict or not note_dict.get("content"):
+            await status.edit_text("❌ Book synthesis failed — please try again.")
+            return
+
+        note_dict.update(
+            {
+                "source": source,
+                "source_type": "book",
+                "attachment": attachment,
+                "detail_level": detail_level,
+                "book_title": title,
+                "book_authors": book_meta.get("authors", []),
+                "book_year": book_meta.get("year", ""),
+            }
+        )
+
+        note_path = write_note_to_vault(note_dict)
+        if not note_path:
+            await status.edit_text("❌ Could not write to Obsidian vault.")
+            return
+
+        words = len((note_dict.get("content") or "").split())
+        await status.edit_text(
+            f"✅ Study notes ready!\n📂 {note_path}\n\n"
+            f"📚 {title}\n✍️ {authors}\n"
+            f"📝 ~{words} words of distilled knowledge\n"
+            f"📎 Attachment: {attachment or 'none'}",
+            disable_web_page_preview=True,
+        )
+    except AllProvidersFailedError as e:
+        logger.error(f"Book pipeline failed — providers exhausted: {e.attempts}")
+        try:
+            await update.message.reply_text(
+                "🚨 Book processing failed — all LLM models are unavailable.\n"
+                "Run /models to switch to a working model, then re-send the file."
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"Book pipeline error: {e}")
+        try:
+            await status.edit_text(f"❌ Book processing failed: {str(e)[:200]}")
+        except Exception:
+            pass
 
 
 async def analyze_and_save(
@@ -399,10 +591,12 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", start_command))
     app.add_handler(CommandHandler("models", models_command))
+    app.add_handler(CommandHandler("research", research_command))
     for cmd in ("summarize", "detailed", "precise", "raw", "book"):
         app.add_handler(CommandHandler(cmd, set_detail_command))
     app.add_handler(CallbackQueryHandler(model_choice_callback, pattern=r"^swm:\d+$"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logger.info("Bot started. Current LLM model: %s", get_current_model())
     app.run_polling()

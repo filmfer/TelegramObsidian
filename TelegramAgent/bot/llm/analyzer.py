@@ -78,6 +78,69 @@ METADATA_ONLY_PROMPT = """Read the content and reply ONLY with raw JSON (no fenc
 {{"title": "concise English title", "category": "one of: __CATS__", "tags": ["t1","t2","t3"]}}
 Valid categories: __CATS__"""
 
+RESEARCH_PROMPT = """You are a research analyst creating a study note for an Obsidian \
+knowledge base on the topic: "{topic}"
+
+Below are web sources (title, URL, extracted content). Synthesize them into a \
+comprehensive, well-structured note. Compare sources; note disagreements.
+
+Structure:
+## 📌 Topic Overview
+## 🔑 Key Findings
+(the substance — what is known/claimed, with specifics)
+## 📊 Facts & Data
+(concrete numbers, dates, versions, commands from the sources)
+## 💡 Analysis & Insights
+(interpretation, implications, expert opinions found)
+## ⚠️ Points of Contention
+(where sources disagree or are uncertain)
+## 🔗 Sources
+- [Title](URL) — one line each
+
+Rules: cite which source supports key claims as (Source: title). Never invent \
+facts not present in the sources. If sources are thin, say so honestly.
+
+End with:
+META_JSON: {{"title": "Research: {topic}", "category": "best fit from: {categories}", "tags": ["research", "..."]}}
+"""
+
+BOOK_SECTION_PROMPT = """This is section {section_num} of {total} from the book \
+"{book_title}" by {authors}. Extract ALL substantive knowledge from this \
+section for a study note:
+
+- Key concepts and their explanations
+- Important facts, numbers, examples, commands
+- Actionable advice or methods
+
+Be thorough and specific. Plain Markdown bullets. Do NOT summarize vaguely — \
+preserve concrete details. Do not include table-of-contents or page furniture."""
+
+BOOK_FINAL_PROMPT = """You are given knowledge extractions from all sections of \
+the book "{book_title}" by {authors}, in order. Merge them into ONE \
+comprehensive study note in this structure:
+
+# 📚 {book_title}
+
+## 📌 About the Book
+(2-4 sentences: what the book covers and who it's for)
+
+## 🔑 Core Ideas
+(the book's central thesis and main concepts, well explained)
+
+## 📖 Chapter-by-Chapter Knowledge
+(a subsection per logical part of the book with the real content — \
+this is where the reader learns; be specific and complete)
+
+## 🛠️ Practical Takeaways
+(actionable lessons, methods, commands)
+
+## ❓ To Explore Further
+
+Rules: preserve concrete details from the extractions. This note replaces \
+reading the whole book — completeness matters more than brevity. End with:
+META_JSON: {{"title": "{book_title} — Study Notes", "category": "books", "tags": ["book", "...3-6 topic tags"]}}
+"""
+
 
 # ------------------------------------------------------------ main entry ---
 
