@@ -1,5 +1,7 @@
 # 📚 Telegram → Gemini → Obsidian Knowledge Agent
 
+<img width="1100" height="614" alt="image" src="https://github.com/user-attachments/assets/245adcc2-d7bd-43f2-a638-9cd945880deb" />
+
 > **Turn Telegram into your personal knowledge capture pipeline.** Send documents, links, and e-books to a bot — get clean, AI-categorized Markdown notes in your Obsidian vault, synced across all your devices.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -195,6 +197,13 @@ ObsidianVault/
 | E-books | `ebooklib` |
 | XML safety | `defusedxml` |
 | Deployment | Docker + docker-compose |
+
+---
+
+## 👤 Author
+
+**Filipe Fernandes**
+📧 filmfer@gmail.com
 
 ---
 
