@@ -141,7 +141,7 @@ this is where the reader learns; be specific and complete)
 
 Rules: preserve concrete details from the extractions. This note replaces \
 reading the whole book — completeness matters more than brevity. End with:
-META_JSON: {{"title": "{book_title} — Study Notes", "category": "books", "tags": ["book", "...3-6 topic tags"]}}
+META_JSON: {{"title": "{book_title} — Study Notes", "category": "books", "categories": ["books", "<1-2 topic categories that match the book's subject, e.g. programming, hacking, finance"], "tags": ["book", "...3-6 topic tags"]}}
 """
 
 VIDEO_PROMPT = """You are given the transcript of a video. Create a study note \

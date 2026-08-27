@@ -798,6 +798,17 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
             }
         )
 
+        # Task 2: link the book into the Obsidian graph via topic hashtags
+        related = [
+            str(t).replace(" ", "-") for t in note_dict.get("tags", [])
+            if t and str(t).lower() not in ("book", "books")
+        ][:5]
+        if related:
+            note_dict["content"] += (
+                "\n\n## 🧭 Related Topics\n"
+                + " ".join(f"#{t}" for t in related)
+            )
+
         note_path = write_note_to_vault(note_dict)
         if not note_path:
             await status.edit_text("❌ Could not write to Obsidian vault.")
