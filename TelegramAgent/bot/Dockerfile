@@ -12,7 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Non-root user for security
-RUN useradd -m appuser && chown -R appuser /app
+RUN useradd -m appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app
 USER appuser
 
 ENV PYTHONUNBUFFERED=1

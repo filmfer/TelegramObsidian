@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -55,6 +56,14 @@ from llm.provider import (
     validate_and_autoswitch,
 )
 from storage.vault_writer import derive_detail_level, write_note_to_vault
+from storage.dedup_store import (
+    acheck_duplicate,
+    arecord_processed,
+    compute_file_fingerprint,
+    compute_text_fingerprint,
+    compute_url_fingerprint,
+    init_db,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,10 +87,31 @@ if not TELEGRAM_TOKEN:
 Path(VAULT_PATH).mkdir(parents=True, exist_ok=True)
 ATTACHMENTS_DIR = Path(VAULT_PATH, "90_Attachments")
 ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+init_db()  # dedup + pending-queue SQLite store (data/agent.db)
 
 DETAIL_LEVELS = {"summarize", "detailed", "precise", "raw", "book"}
 USER_COOLDOWN_SECONDS = 10
 _user_last_request: dict = {}
+
+
+def _wants_force(text: Optional[str]) -> bool:
+    """True when the user appended '--force' to a caption/message."""
+    return bool(text) and "--force" in text.lower()
+
+
+async def _reject_duplicate(update: Update, fingerprint: str, force: bool) -> bool:
+    """Return True (and notify the user) if this content was already saved."""
+    if not fingerprint or force:
+        return False
+    dup = await acheck_duplicate(fingerprint)
+    if not dup:
+        return False
+    await update.message.reply_text(
+        "⚠️ This content was already saved:\n"
+        f"📂 {dup['note_path']} ({dup['created_at']})\n\n"
+        "Send it again with `--force` in the caption to create it anyway."
+    )
+    return True
 
 WEEKLY_SECONDS = 7 * 24 * 60 * 60
 MAX_MODEL_BUTTONS = 30
@@ -194,6 +224,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with tempfile.TemporaryDirectory() as tmp:
         local_path = await file_obj.download_to_drive(tmp)
+        fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
+        force = _wants_force(caption)
+        if await _reject_duplicate(update, fingerprint, force):
+            return
         attachment_rel = _save_attachment(local_path)
 
         # --- E-BOOK ROUTE ---
@@ -211,6 +245,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 detail_level=detail_level,
                 source=f"telegram-book::{Path(local_path).name}",
                 attachment=attachment_rel,
+                fingerprint=fingerprint,
+                force=force,
             )
             return
 
@@ -230,6 +266,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         source_type="document",
         source_kind="document",
         attachment=attachment_rel,
+        fingerprint=fingerprint,
+        force=force,
     )
 
 
@@ -259,6 +297,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await analyze_and_save(
             update, context, content, detail,
             source=text, source_type="link", source_kind="document",
+            fingerprint=compute_url_fingerprint(text),
+            force=_wants_force(text),
         )
         return
 
@@ -269,6 +309,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         source="telegram-text::manual note",
         source_type="text",
         source_kind="text",
+        fingerprint=compute_text_fingerprint(text[:12000]),
+        force=_wants_force(text),
     )
 
 
@@ -289,6 +331,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with tempfile.TemporaryDirectory() as tmp:
         file_obj = await media.get_file()
         local_path = await file_obj.download_to_drive(tmp)
+        fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
         try:
             transcript = await transcribe_audio(local_path)
         except TranscriptionError as e:
@@ -311,6 +354,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         source="telegram-voice::transcription",
         source_type="voice",
         source_kind="text",
+        fingerprint=fingerprint,
+        force=_wants_force(caption),
     )
 
 
@@ -330,6 +375,9 @@ async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _research_topic(update, context, topic, status):
     """Search web → scrape top sources → LLM synthesis → cited note."""
+    fingerprint = compute_text_fingerprint(topic)
+    if await _reject_duplicate(update, fingerprint, _wants_force(topic)):
+        return
     results = await asyncio.to_thread(search_web, topic, 5)
     if not results:
         await status.edit_text("❌ No search results found for this topic.")
@@ -369,6 +417,7 @@ async def _research_topic(update, context, topic, status):
     if not note_path:
         await status.edit_text("❌ Could not write to Obsidian vault.")
         return
+    await arecord_processed(fingerprint, "research", f"research::{topic}", note_path)
     await status.edit_text(
         f"🔎 Research saved!\n📂 {note_path}\n📝 {note_dict.get('title')}",
         disable_web_page_preview=True,
@@ -381,6 +430,9 @@ async def _process_youtube(update, context, url):
     """YouTube link → free caption transcript → knowledge note with video info."""
     video_id = extract_youtube_id(url) or ""
     detail = context.user_data.get("detail_level") or "summarize"
+    fingerprint = compute_url_fingerprint(url)
+    if await _reject_duplicate(update, fingerprint, _wants_force(url)):
+        return
     status = await update.message.reply_text("🎬 Fetching video transcript…")
 
     meta, transcript = {}, None
@@ -425,6 +477,7 @@ async def _process_youtube(update, context, url):
     if not note_path:
         await status.edit_text("❌ Could not write to Obsidian vault.")
         return
+    await arecord_processed(fingerprint, "video", url, note_path)
     await status.edit_text(f"🎬 Video note saved!\n📂 {note_path}\n📝 {note_dict.get('title')}", disable_web_page_preview=True)
 
 
@@ -448,6 +501,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with tempfile.TemporaryDirectory() as tmp:
         file_obj = await video.get_file()
         local_path = await file_obj.download_to_drive(tmp)
+        fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
+        if await _reject_duplicate(update, fingerprint, _wants_force(caption := (update.message.caption or "").strip())):
+            return
         out_mp3 = str(Path(tmp) / "audio.mp3")
         try:
             await asyncio.to_thread(extract_audio_track, local_path, out_mp3)
@@ -485,7 +541,8 @@ def _save_attachment(local_path: str):
         return None
 
 
-async def _save_book_note(update, context, book_meta, detail_level="book", source="", attachment=None):
+async def _save_book_note(update, context, book_meta, detail_level="book", source="",
+                          attachment=None, fingerprint: str = "", force: bool = False):
     """Launch background deep-processing of an e-book (map-reduce over sections)."""
     title = book_meta.get("title") or "Untitled Book"
     status = await update.message.reply_text(
@@ -493,11 +550,13 @@ async def _save_book_note(update, context, book_meta, detail_level="book", sourc
         f"This runs in the background — I'll keep you updated here."
     )
     asyncio.create_task(
-        _process_book_task(update, book_meta, detail_level, source, attachment, status)
+        _process_book_task(update, book_meta, detail_level, source, attachment,
+                           status, fingerprint, force)
     )
 
 
-async def _process_book_task(update, book_meta, detail_level, source, attachment, status):
+async def _process_book_task(update, book_meta, detail_level, source, attachment, status,
+                             fingerprint: str = "", force: bool = False):
     """
     Map-reduce study-note pipeline:
       clean → split into section-sized chunks → extract knowledge per chunk
@@ -506,6 +565,8 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
     """
     title = book_meta.get("title") or "Untitled Book"
     authors = ", ".join(book_meta.get("authors", [])) or "Unknown"
+    if await _reject_duplicate(update, fingerprint, force):
+        return
     try:
         raw = clean_book_text(book_meta.get("text", ""))
         if len(raw) < 500:
@@ -560,6 +621,8 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
         if not note_path:
             await status.edit_text("❌ Could not write to Obsidian vault.")
             return
+        if fingerprint:
+            await arecord_processed(fingerprint, "book", source, note_path)
 
         words = len((note_dict.get("content") or "").split())
         await status.edit_text(
@@ -589,8 +652,11 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
 async def analyze_and_save(
     update, context, text, detail_level, source, source_type,
     attachment=None, source_kind=None,
+    fingerprint: str = "", force: bool = False,
 ):
     """Run AI analysis and persist the resulting knowledge note."""
+    if await _reject_duplicate(update, fingerprint, force):
+        return
     source_url = source if source_type == "link" else ""
     if source_kind is None:
         source_kind = "document"
@@ -620,6 +686,9 @@ async def analyze_and_save(
     if not note_path:
         await update.message.reply_text("❌ Could not write to Obsidian vault.")
         return
+
+    if fingerprint:
+        await arecord_processed(fingerprint, source_type, source, note_path)
 
     preview = (note_dict.get("content") or "")[:400]
     await update.message.reply_text(

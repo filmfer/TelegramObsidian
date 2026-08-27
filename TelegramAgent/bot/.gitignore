@@ -7,3 +7,6 @@ __pycache__/
 
 # Runtime agent state (chosen LLM model, cached catalogs)
 config.json
+
+# Dedup + pending-queue SQLite database
+data/
