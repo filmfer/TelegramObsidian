@@ -57,6 +57,7 @@ from llm.provider import (
     validate_and_autoswitch,
 )
 from storage.vault_writer import derive_detail_level, write_note_to_vault
+from storage.vault_organizer import apply_merge, build_merge_plan
 from storage.dedup_store import (
     acheck_duplicate,
     arecord_processed,
@@ -426,6 +427,62 @@ async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎙️ Audio: {len(voices)} → /voice to process\n\n"
         "Items expire after "
         f"{PENDING_QUEUE_TTL_HOURS}h."
+    )
+
+
+# ---- /organize (Task 3) ----
+
+async def organize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Merge sparse category folders. '/organize preview' only shows the plan."""
+    preview = bool(context.args) and context.args[0].lower() == "preview"
+    status = StatusMessage(await update.message.reply_text("🧹 Analyzing vault categories…"))
+    plan = await asyncio.to_thread(build_merge_plan, VAULT_PATH)
+    if not plan:
+        await status.update(
+            "✅ Vault is tidy — no merge candidates.\n"
+            "Tune config/category_taxonomy.yaml (protected/manual/threshold) if needed."
+        )
+        return
+    lines = [f"• {f} → {t} ({c} notes)" for f, t, c in plan]
+    text = "🧹 Proposed merges:\n" + "\n".join(lines)
+    if preview:
+        await status.update(text + "\n\n(Preview only — nothing was moved. Run /organize to apply.)")
+        return
+
+    context.user_data["organize_plan"] = plan
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Apply", callback_data="org:yes"),
+        InlineKeyboardButton("❌ Cancel", callback_data="org:no"),
+    ]])
+    try:
+        await status.message.edit_text(
+            text + "\n\nApply these merges?", reply_markup=markup
+        )
+    except Exception as e:
+        logger.warning(f"Could not show organize keyboard: {e}")
+        context.user_data.pop("organize_plan", None)
+        await status.update(text + "\n\n(could not show confirmation buttons — cancelled)")
+
+
+async def organize_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Apply or cancel the stored merge plan."""
+    query = update.callback_query
+    await query.answer()
+    plan = context.user_data.get("organize_plan")
+    if not plan:
+        await query.edit_message_text("⌛ The proposal expired — run /organize again.")
+        return
+    if query.data == "org:no":
+        context.user_data.pop("organize_plan", None)
+        await query.edit_message_text("❌ Cancelled — nothing was moved.")
+        return
+
+    await query.edit_message_text("🧹 Moving notes…")
+    moved = await asyncio.to_thread(apply_merge, VAULT_PATH, plan)
+    context.user_data.pop("organize_plan", None)
+    await query.edit_message_text(
+        f"✅ Organized! {moved} notes moved.\n"
+        "Frontmatter updated, old categories kept as tags; a git commit was written."
     )
 
 
@@ -969,6 +1026,8 @@ def main():
     app.add_handler(CommandHandler("text", text_note_command))
     app.add_handler(CommandHandler("voice", voice_note_command))
     app.add_handler(CommandHandler("queue", queue_command))
+    app.add_handler(CommandHandler("organize", organize_command))
+    app.add_handler(CallbackQueryHandler(organize_callback, pattern=r"^org:(yes|no)$"))
     for cmd in ("summarize", "detailed", "precise", "raw", "book"):
         app.add_handler(CommandHandler(cmd, set_detail_command))
     app.add_handler(CallbackQueryHandler(model_choice_callback, pattern=r"^swm:\d+$"))

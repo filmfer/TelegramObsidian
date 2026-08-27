@@ -1,0 +1,16 @@
+# Category taxonomy for the /organize command.
+# Edit freely — the bot reads this file every time /organize runs.
+
+# Folders that are never merged automatically.
+protected:
+  - Books
+  - Finance
+
+# Manual merges: specific folder -> general folder (always applied).
+manual:
+  Kubernetes: Programming
+  Docker: Programming
+  Machine-Learning: AI
+
+# Folders with fewer notes than this become merge candidates.
+threshold: 3
