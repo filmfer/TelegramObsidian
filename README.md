@@ -45,9 +45,9 @@ You → Telegram → 🧠 AI → Obsidian Vault → all your devices
 | 🎬 | YouTube / video links | Free caption transcript → summary note with video info |
 | 📖 | E-books: EPUB · MOBI · AZW·AZW3·AZW4 · DJVU · FB2 · LIT | Title / author / year extracted + file attached |
 | 📧 | Email files (`.eml`) | Parsed → knowledge note |
-| 💭 | **Plain text thoughts** | Cleaned, structured & categorized by AI |
-| 🗣️ | Voice notes (`.ogg` / audio files) | Free Whisper transcription → knowledge note · caption `research` = deep search |
-| 🎬 | Video links & uploads *(roadmap)* | Transcript → summary + categories |
+| 💭 | **Plain text thoughts** | Queued safely, then `/text` merges them into one structured, categorized note |
+| 🗣️ | Voice notes (`.ogg` / audio files) | Queued, then `/voice` transcribes (free Whisper) into one note · caption `research` = instant deep search |
+| 🎥 | Uploaded video files (≤20MB) | ffmpeg extracts audio → Whisper transcript → summary note |
 
 ### 🎚️ Detail levels — you control the depth
 
@@ -61,10 +61,41 @@ Send with a caption or `/command`:
 | `/raw` | Verbatim text, metadata only |
 | `/book` | Book mode: title, author(s), year + file attached |
 
+### ⌨️ Commands
+
+| Command | Action |
+|---|---|
+| `/text` | Turn every queued text message into **one** note |
+| `/voice` | Transcribe every queued audio into **one** note |
+| `/queue` | See what's waiting in the queues |
+| `/research <topic>` | Deep web research with cited sources |
+| `/models` | List working LLM models, tap to switch instantly |
+| `/organize preview` | Show which sparse category folders would be merged |
+| `/organize` | Propose merges and ask for confirmation before moving anything |
+| `/start` · `/help` | Full usage guide |
+
+### 🛡️ Never lose work
+
+- **Duplicate detection** — the same link, file or text sent twice is caught
+  by a local SQLite fingerprint store (URLs are normalized; tracking params
+  stripped; YouTube links collapse to the video id). Add `--force` to any
+  caption/message to override.
+- **Queues survive restarts** — `/text` and `/voice` items are persisted in
+  SQLite and expire after `PENDING_QUEUE_TTL_HOURS` (default 24h).
+- **10-minute hard cap** — every heavy task is wrapped in a deadline with a
+  "still working" checkpoint; runaway jobs are cancelled and you're told why.
+- **Thumbnails** — link & video notes embed the page's `og:image` (or the
+  YouTube thumbnail) at the top, stored in `90_Attachments/thumbnails/`.
+
 ### 🗂️ Automatic organization
 
 AI classifies every note into your vault folders:
 `Travel` · `Car` · `Finance` · `Programming` · `AI` · `Religion` · `Politics` · `IoT` · `Database` · `Food` · `Books`… — fully customizable.
+Books get **multi-label categories** + a *Related Topics* hashtag section, so
+the Obsidian graph connects them to every other note on the topic.
+`/organize` tidies the vault later: sparse folders are merged into bigger
+ones using `config/category_taxonomy.yaml` (protected folders, manual
+mappings and a note-count threshold) — always with your confirmation.
 
 ### 🔄 Multi-device sync without conflicts
 
@@ -172,9 +203,11 @@ auto-switches to the best free alternative, and notifies you — weekly checks i
 - [x] `/research <topic>` — DuckDuckGo + scrape top sources + cited synthesis
 - [x] YouTube/video links → transcript summaries; uploaded videos (≤20MB) → ffmpeg + Whisper
 - [x] Scraper fallback chain: browser headers → cloudscraper → jina.ai
-- [ ] YouTube/video links → transcript summaries
 - [x] Chapter-aware book pipeline: TOC/index stripped → map-reduce over sections → background processing with live progress
-- [ ] Scraper fallback chain (cloudscraper / headless fallback)
+- [x] v1.2 — Dedup store (`--force`) · `/text` + `/voice` queues · error handler + 10-min deadlines · thumbnails · `/organize`
+- [ ] Semantic search over the vault (`/search <query>`)
+- [ ] Photo/screenshot OCR ingestion
+- [ ] Weekly review notes
 
 ---
 
