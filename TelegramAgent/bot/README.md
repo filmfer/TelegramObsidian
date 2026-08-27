@@ -1,262 +1,201 @@
 # Telegram → Gemini → Obsidian Knowledge Agent
 
-A Telegram bot that receives **documents**, **links**, and **e-books**, analyzes them with **Google Gemini**, and writes categorized Markdown notes into your **Obsidian vault** (stored in Google Drive).
+Self-hosted Telegram bot: send documents, links, e-books, voice notes and
+video — get clean, AI-categorized **knowledge notes** in your Obsidian vault,
+synced across all your devices.
+
+![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
+![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
+> This is the **operator manual** for the bot package. For the project
+> showcase, see the [root README](../../README.md).
+
+---
+
+## Module map
+
+```
+bot.py                     orchestrator: handlers, queues, deadlines, dedup
+llm/provider.py            litellm multi-provider fallback chain + /models + weekly health check
+llm/analyzer.py            prompts (knowledge/research/video/book) + META_JSON parsing
+parsers/document_parser.py PDF · DOCX · XLSX · TXT · MD · JSON · CSV · EML
+parsers/link_parser.py     3-layer scraper (headers → cloudscraper → jina.ai), SSRF-safe, og:image
+parsers/book_parser.py     e-book metadata + text (PDF/EPUB/MOBI/AZW/AZW3/AZW4/DJVU/FB2/LIT)
+parsers/audio_parser.py    Groq Whisper transcription
+parsers/video_parser.py    YouTube metadata/transcript; uploaded video → ffmpeg audio
+parsers/search_parser.py   DuckDuckGo search for /research
+storage/vault_writer.py    sanitized note writing + YAML frontmatter + CATEGORY_MAP
+storage/dedup_store.py     SQLite fingerprints (dedup) + /text · /voice pending queue
+storage/vault_organizer.py /organize merge engine
+notifications.py           editable status messages, task deadlines, global error handler
+config/category_taxonomy.yaml   protected folders, manual merges, threshold
+data/agent.db              SQLite state (dedup + queues) — outside the vault on purpose
+```
 
 ---
 
 ## Features
 
-- **Input via Telegram**
-  - Documents: `PDF, DOCX, XLSX, TXT, JSON, MD, CSV, EML`
-  - Links: paste `https://...`
-  - E-mails: send a `.eml` file
-  - **E-books**: `PDF, EPUB, MOBI, AZW, AZW3, AZW4, DJVU, FB2, LIT`
-    - `book` detail level extracts **title / author(s) / publish year**
-      and attaches the original file to the note
-- **Detail levels** (caption keyword or command):
-  `/summarize` · `/detailed` · `/precise` · `/raw` · `/book`
-  (default `detailed`)
-- **Multi-label AI categorization** into folders: Travel, Car, Finance, Programming, AI, Religion, Politics, IoT, Database, Food, **Books**…
-- **Multi-device sync**: Google Drive + Git inside the vault (no conflicts, no data loss)
+| Input | What happens |
+|---|---|
+| 📄 Documents: `PDF · DOCX · XLSX · TXT · MD · JSON · CSV · EML` | Full-text extraction → knowledge note |
+| 🔗 Links (`https://…`) | 3-layer scraping chain, SSRF-safe, `og:image` thumbnail |
+| 🎬 YouTube / video links | Caption transcript → summary note with video info + thumbnail |
+| 🎥 Uploaded videos (≤20MB) | ffmpeg extracts audio → Whisper → summary note |
+| 📖 E-books: `EPUB · MOBI · AZW/AZW3/AZW4 · DJVU · FB2 · LIT · PDF` | TOC/index stripped → map-reduce over sections → deep study note (background, live progress) |
+| 📧 Email files (`.eml`) | Parsed → knowledge note |
+| 💭 Plain text | Queued → `/text` merges into one structured note |
+| 🗣️ Voice notes / audio | Queued → `/voice` transcribes (free Whisper) into one note; caption `research` = instant deep search |
+| 🔎 `/research <topic>` | DuckDuckGo → scrape top sources → cited synthesis note |
+
+### Detail levels (caption or command)
+
+| Command | Output |
+|---|---|
+| `/summarize` | Quick-reference overview |
+| `/detailed` ⭐ | Full study note: Overview · Key Concepts · Facts & Data · Insights · Open Questions |
+| `/precise` | Exact data extraction — every number preserved |
+| `/raw` | Verbatim text, metadata only |
+| `/book` | Deep book mode (map-reduce, background) |
+
+### Commands
+
+| Command | Action |
+|---|---|
+| `/text` | Turn every queued text message into **one** note |
+| `/voice` | Transcribe every queued audio into **one** note |
+| `/queue` | See what's waiting (items expire after `PENDING_QUEUE_TTL_HOURS`, default 24h) |
+| `/research <topic>` | Deep web research with cited sources |
+| `/models` | List working LLM models, tap to switch instantly |
+| `/organize preview` | Show which sparse category folders would be merged |
+| `/organize` | Propose merges → confirm via inline keyboard → applies with a git commit |
+| `/start` · `/help` | Full usage guide |
+
+### Never lose work
+
+- **Dedup** — same link/file/text twice is caught by SQLite fingerprints
+  (URLs normalized, tracking params stripped, YouTube collapses to video id).
+  Override per-send with `--force` in the caption/message.
+- **Queues survive restarts** — `/text` and `/voice` items live in SQLite.
+- **10-minute hard cap** — every heavy task has a deadline with a
+  "still working" checkpoint; runaway jobs are cancelled cleanly.
+- **Global error handler** — any unhandled exception is logged (rotating
+  `logs/bot.log`) and you get a friendly message, never silence.
 
 ---
 
-## Architecture
+## Multi-provider LLM
 
-```
-Telegram → python-telegram-bot (polling) → parsers (docs/links/books)
-       → Gemini (google-genai) → vault_writer → ObsidianVault/ (on Google Drive)
-```
-
-- No inbound ports exposed — the bot uses **outbound HTTPS polling** (minimal attack surface).
-- Secrets are injected via `.env` only; `.dockerignore` prevents them from entering the image.
-- SSRF protection blocks private/reserved IP ranges in the link parser.
-- XML parsing uses `defusedxml` (XXE/billion-laughs safe).
-- Path traversal is prevented in the vault writer (folder/file sanitization).
-- Per-user request cooldown + Telegram `AIORateLimiter` prevent flooding.
-
----
-
-## Setup (Local dev — 5 min)
-
-### 1. Prerequisites
-
-- **Python 3.9+** (local dev uses your system Python)
-- **Google Gemini API key** — get one at https://aistudio.google.com/apikey
-- **Telegram Bot Token** — create a bot via [@BotFather](https://t.me/BotFather) → `/newbot`
-
-### 2. Install
-
-```bash
-cd TelegramAgent/bot
-python3 -m venv .venv
-
-# macOS / Linux:
-source .venv/bin/activate
-# Windows:
-# .venv\Scripts\activate
-
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-### 3. Configure `.env`
+Configured in `.env`; the bot probes providers at startup and **weekly**
+(auto-switching if a model dies), and you can always switch live:
 
 ```ini
-# --- Telegram ---
-TELEGRAM_BOT_TOKEN=123456:ABC-your-token
-
-# --- Gemini / LLM ---
-GEMINI_API_KEY=your_gemini_api_key
-GEMINI_MODEL=gemini-2.5-pro
-
-# --- Obsidian Vault ---
-# Local dev: point at your synced vault folder
-OBSIDIAN_VAULT_PATH=/path/to/GoogleDrive/ObsidianVault
+LLM_MODEL=gemini/gemini-flash-latest
+LLM_FALLBACKS=groq/openai/gpt-oss-120b,groq/llama-3.1-8b-instant,gemini/gemini-pro-latest
 ```
 
-> ⚠️ **Never commit `.env`.** It is already in `.gitignore` and `.dockerignore`.
+| Provider | Key | Free tier |
+|---|---|---|
+| Google Gemini (default) | `GEMINI_API_KEY` | generous free tier |
+| Groq | `GROQ_API_KEY` | free Llama + **free Whisper** (audio) |
+| OpenRouter | `OPENROUTER_API_KEY` | models with `:free` suffix |
+| Ollama (local) | `OLLAMA_HOST` | fully local, no key |
 
-### 4. Run locally
-
-```bash
-export $(grep -v '^#' .env | xargs)   # load env vars (macOS/Linux)
-# Windows PowerShell: Get-Content .env | ForEach-Object { if ($_ -match '^(\w+)=(.*)$') { Set-Item Env:$matches[1] $matches[2] } }
-python bot.py
-```
-
-### 5. Test the whole pipeline (no API key needed)
-
-```bash
-cd TelegramAgent/bot
-OBSIDIAN_VAULT_PATH=../../ObsidianVault .venv/bin/python -m tests.test_pipeline
-```
-
-Expected output:
-
-```
-✅ BOOK_EXTENSIONS covers all requested formats
-✅ is_book_file works
-✅ extract_book_metadata -> Test Book Title by ['Jane Doe', 'John Smith']
-✅ Book note written with frontmatter -> Books/2026-08-18-test-book-title.md
-✅ parse_document extracted text
-✅ write_note_to_vault -> Programming/2026-08-18-sample-note-title.md
-✅ End-to-end pipeline test PASSED
-```
+`/models` shows every currently-reachable model with a tap-to-switch menu;
+when all providers fail mid-task the bot offers that menu automatically.
 
 ---
 
-## Deploy on Oracle Free VPS (Docker)
+## Deploy on a headless VPS (Docker)
 
 ```bash
-# 1. On the VPS, clone the repo:
-git clone <your-repo-url> telegram-agent && cd telegram-agent/TelegramAgent/bot
+# 1. Clone
+git clone https://github.com/filmfer/TelegramObsidian.git && cd TelegramObsidian/TelegramAgent/bot
 
-# 2. Create .env with your real secrets (never commit):
-cp .env.example .env
-nano .env
+# 2. Create .env with real secrets (never committed)
+cp .env.example .env && nano .env
 
-# 3. Mount your Google Drive vault.
-#    Option A — Drive folder is on the VPS (rsync from your Mac):
-#       rsync -avz ~/path/to/ObsidianVault/ user@vps:/srv/obsidian-vault/
-#    Option B — Mount Google Drive via rclone (cloud mount, headless-friendly):
-#       sudo bash setup_rclone.sh
-#       (installs rclone, guides headless OAuth, creates systemd service)
+# 3. Mount the Google-Drive vault (headless rclone OAuth)
+sudo bash setup_rclone.sh    # installs rclone+fuse, headless OAuth, systemd mount
 
-# 4. Build & run:
+# 4. Build & run
 docker compose up -d --build
 
-# 5. Check logs:
-docker compose logs -f telegram-agent
+# 5. Logs / state
+docker compose logs -f --tail 50
+docker compose exec telegram-agent ls -la /app/data   # agent.db (dedup + queues)
 ```
 
-### Automated Google Drive mount (`setup_rclone.sh`)
+> **Persistence:** the dedup/queue DB lives in the `agent-data` Docker volume
+> (`/app/data` inside the container) — it survives rebuilds. The vault itself
+> is bind-mounted from `OBSIDIAN_VAULT_HOST_PATH` (your rclone mount).
 
-For a **headless Ubuntu server** (no browser/window manager), run the included script to mount your Google Drive vault automatically:
+After a `git pull`, update with:
 
 ```bash
-sudo bash setup_rclone.sh
+cd TelegramAgent/bot && docker compose up -d --build
 ```
-
-It will:
-
-1. Install `rclone` + `fuse3`
-2. Create the `gdrive` remote pointing at your vault folder ID
-3. Guide you through **headless OAuth** — it prints a URL; open it in your local browser, authorize, and paste the verification code back
-4. Create the mount point `/srv/obsidian-vault`
-5. Create + enable a **systemd service** (`rclone-gdrive`) so the mount survives reboots
-
-After it finishes, set in `.env`:
-
-```ini
-OBSIDIAN_VAULT_HOST_PATH=/srv/obsidian-vault
-```
-
-Then rebuild: `docker compose up -d --build`
-
-`docker-compose.yml`:
-
-- No host ports exposed (polling only — safest)
-- `env_file: ./.env` injects secrets at runtime (never baked into the image)
-- **Bind mount** `${OBSIDIAN_VAULT_HOST_PATH:-/srv/obsidian-vault}:/data/vault` — writes directly to the Google Drive folder on the host
-- Runs as non-root user
-
-The bind mount path is read from `OBSIDIAN_VAULT_HOST_PATH` in `.env` (defaults to `/srv/obsidian-vault`).
 
 ---
 
 ## Multi-device sync (zero data loss)
 
-| Device | How |
+| Device | Sync |
 |---|---|
-| MacBook Air M2 | Google Drive for Desktop |
-| Windows PC (personal) | Google Drive for Desktop |
-| Windows PC (work) | Google Drive for Desktop |
-| Android / iOS | **DriveSync** or **FolderSync** (two-way sync of the vault folder) |
-| All devices | **Obsidian Git plugin** — install, set auto-push every 5 min |
-
-Git inside the vault prevents silent overwrite conflicts: two devices editing the same file produce a Git-detectable conflict instead of Google Drive's "file (1)" duplication.
-
-> **First-time Git setup in the vault:**
-> ```
-> cd ObsidianVault
-> git init
-> git add -A && git commit -m "init vault"
-> git remote add origin <private-github-repo-url>
-> git push -u origin main
-> ```
-> Then install the **Obsidian Git** community plugin on each device and enable auto commit/push.
-
----
-
-## Telegram usage
-
-| Command | Action |
-|---|---|
-| `/start` | Help message |
-| `/summarize` `/detailed` `/precise` `/raw` `/book` | Set default detail level |
-| *(send doc + caption)* "summarize" | Process at that detail level |
-| *(send e-book, any supported ext)* | Auto-detected → book note with title/author/year + attachment |
-| *(paste URL)* | Scrapes + summarizes the page (SSRF-protected) |
-
-### Book notes (`/book` or caption `book`)
-
-When a document matches a book extension (or detail level is `book`), the bot:
-
-1. Extracts **title, author(s), publish year** from the file metadata
-2. Writes a note to `Books/` with YAML frontmatter:
-
-   ```yaml
-   ---
-   title: "The Pragmatic Programmer"
-   source_type: book
-   book_title: "The Pragmatic Programmer"
-   book_authors: [Andrew Hunt, David Thomas]
-   book_year: "1999"
-   attachment: 90_Attachments/the-pragmatic-programmer.epub
-   detail_level: book
-   ---
-   ```
-
-3. Copies the original e-book into `90_Attachments/` so you can open it from Obsidian.
-
-> **Note**: EPUB / FB2 / PDF metadata is parsed from the file. For MOBI / AZW / DJVU / LIT full text decoding is best-effort — the file is still attached to the note.
+| 🖥️ MacBook / Windows PCs | Google Drive for Desktop |
+| 🖥️ Headless VPS | rclone mount (`setup_rclone.sh`) |
+| 📱 Android | DriveSync / FolderSync |
+| 🔁 Versioning | Git repo inside the vault + Obsidian Git plugin |
 
 ---
 
 ## Security
 
-| Concern | Mitigation |
-|---|---|
-| Secrets in repo / image | `.env` in `.gitignore` + `.dockerignore`; secrets only via `env_file` at runtime |
-| SSRF (link parser) | Blocks private/reserved IP ranges (RFC 1918, link-local, cloud metadata `169.254.169.254`, IPv6) |
-| XXE / billion-laughs (FB2) | `defusedxml` for all XML parsing |
-| Path traversal | Vault writer sanitizes folder names + filename slugs (strips `..`, `/`, `\`) |
-| Brute-force / flooding | Per-user cooldown (10 s) + Telegram `AIORateLimiter` |
-| Exposed ports | None — outbound HTTPS polling only |
-| Non-root container | Docker runs as `appuser` |
-| API-key validation | Clear error message before any network call if `GEMINI_API_KEY` missing |
+- Secrets only via `.env`; `.dockerignore` keeps them out of the image
+- SSRF protection on all outbound scraping **and** thumbnail downloads
+  (private/reserved IP ranges blocked, DNS-resolved)
+- Path-traversal sanitization on every vault write and category name
+- `defusedxml` for untrusted XML (e-books, emails)
+- Per-user cooldown + Telegram `AIORateLimiter`
+- Non-root container user, no inbound ports (outbound polling only)
 
 ---
 
 ## Environment vars (`.env`)
 
-```ini
-TELEGRAM_BOT_TOKEN=xxxx:token
-GEMINI_API_KEY=your_gemini_key
-GEMINI_MODEL=gemini-2.5-pro
-OBSIDIAN_VAULT_PATH=/data/vault
-```
+| Variable | Default | Purpose |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | — | **required** |
+| `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` / `OLLAMA_HOST` | — | LLM providers (at least one) |
+| `LLM_MODEL` | `gemini/gemini-flash-latest` | preferred model (litellm format) |
+| `LLM_FALLBACKS` | see example | comma-separated fallback chain |
+| `TELEGRAM_CHAT_ID` | — | chat for proactive alerts (weekly model check) |
+| `OBSIDIAN_VAULT_PATH` | `/data/vault` | vault path **inside** the container |
+| `OBSIDIAN_VAULT_HOST_PATH` | `/srv/obsidian-vault` | host path bind-mounted into the container |
+| `DEDUP_DB_PATH` | `data/agent.db` | SQLite dedup + queue store |
+| `PENDING_QUEUE_TTL_HOURS` | `24` | expiry for `/text`/`/voice` queue items |
+| `TASK_TIMEOUT_SECONDS` | `600` | hard cap per task |
+| `TASK_WARN_SECONDS` | `100` | "still working" checkpoint |
+| `STAGING_DIR` | `data/staging` | queued audio staging area |
+| `CATEGORY_TAXONOMY_PATH` | `config/category_taxonomy.yaml` | `/organize` rules |
+| `LOG_DIR` | `logs` | rotating log files |
 
 ---
 
 ## Troubleshooting
 
-| Problem | Fix |
+| Symptom | Fix |
 |---|---|
-| `RuntimeError: Set TELEGRAM_BOT_TOKEN in .env` | `.env` missing or empty — `cp .env.example .env` and fill it |
-| `GEMINI_API_KEY is not set...` | Add your Gemini key to `.env` |
-| `ModuleNotFoundError: No module named 'ebooklib'` | `pip install -r requirements.txt` |
-| Bot not writing to vault | Verify `OBSIDIAN_VAULT_PATH` points at a writable folder |
-| E-book metadata empty (MOBI/AZW/etc.) | Best-effort — the file still gets attached to the note |
-| Docker build copies `.env` | Use the provided `.dockerignore` |
+| `litellm.NotFoundError` / dead model errors | Run `/models` — the bot lists every reachable model; tap to switch. The weekly check also auto-heals. |
+| Notes land in `uncategorized/` | The model's `META_JSON` was missing → the parser derives metadata; if it persists, switch models via `/models`. |
+| Bot says "already saved" for new content | It's the dedup store. Add `--force` to your message, or clear the DB: `docker compose exec telegram-agent rm /app/data/agent.db` then restart. |
+| `/organize` finds no candidates | All folders are at/above `threshold` or protected — tune `config/category_taxonomy.yaml`. |
+| Voice note gets no answer | Check `GROQ_API_KEY` (Whisper); transcription errors are always reported. |
+| rclone mount down | `systemctl status rclone-gdrive --no-pager` · `sudo rclone lsd gdrive:` |
+
+---
+
+## License
+
+MIT — see [LICENSE](../../LICENSE).
