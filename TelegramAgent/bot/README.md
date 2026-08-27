@@ -190,6 +190,7 @@ cd TelegramAgent/bot && docker compose up -d --build
 | `litellm.NotFoundError` / dead model errors | Run `/models` — the bot lists every reachable model; tap to switch. The weekly check also auto-heals. |
 | Notes land in `uncategorized/` | The model's `META_JSON` was missing → the parser derives metadata; if it persists, switch models via `/models`. |
 | Bot says "already saved" for new content | It's the dedup store. Add `--force` to your message, or clear the DB: `docker compose exec telegram-agent rm /app/data/agent.db` then restart. |
+| Notes written but DB/Drive never syncs; `ls` shows **`Input/output error`** on the mount | The rclone mount has **no VFS cache** — writes don't settle. Fix the unit: add `--vfs-cache-mode writes --buffer-size 64M --vfs-read-ahead 128M --dir-cache-time 1m` to `ExecStart` and `systemctl restart`. No re-auth needed. |
 | `/organize` finds no candidates | All folders are at/above `threshold` or protected — tune `config/category_taxonomy.yaml`. |
 | Voice note gets no answer | Check `GROQ_API_KEY` (Whisper); transcription errors are always reported. |
 | rclone mount down | `systemctl status rclone-gdrive --no-pager` · `sudo rclone lsd gdrive:` |
