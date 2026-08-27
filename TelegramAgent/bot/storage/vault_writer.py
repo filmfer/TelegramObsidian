@@ -113,6 +113,7 @@ def write_note_to_vault(note: Dict[str, Any]) -> Optional[str]:
         "tags": note.get("tags", []),
         "detail_level": note.get("detail_level", DEFAULT_DETAIL),
         "attachment": note.get("attachment", ""),
+        "thumbnail": note.get("thumbnail", ""),
         "book_title": note.get("book_title", ""),
         "book_authors": note.get("book_authors", []),
         "book_year": note.get("book_year", ""),

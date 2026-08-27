@@ -1,5 +1,6 @@
 """Telegram → Gemini → Obsidian Knowledge Agent."""
 import asyncio
+import hashlib
 import logging
 import os
 import shutil
@@ -20,7 +21,7 @@ from telegram.ext import (
 )
 
 from parsers.document_parser import parse_document
-from parsers.link_parser import parse_link
+from parsers.link_parser import parse_link, parse_link_with_meta, download_thumbnail
 from parsers.book_parser import (
     clean_book_text,
     extract_book_metadata,
@@ -97,6 +98,8 @@ if not TELEGRAM_TOKEN:
 Path(VAULT_PATH).mkdir(parents=True, exist_ok=True)
 ATTACHMENTS_DIR = Path(VAULT_PATH, "90_Attachments")
 ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+THUMBNAILS_DIR = Path(VAULT_PATH, "90_Attachments", "thumbnails")
+THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
 init_db()  # dedup + pending-queue SQLite store (data/agent.db)
 
 DETAIL_LEVELS = {"summarize", "detailed", "precise", "raw", "book"}
@@ -126,6 +129,19 @@ async def _reject_duplicate(update: Update, fingerprint: str, force: bool) -> bo
         "Send it again with `--force` in the caption to create it anyway."
     )
     return True
+
+
+async def _fetch_thumbnail(img_url: str, slug: str) -> str:
+    """Download a thumbnail into 90_Attachments/thumbnails/; vault-rel path or ''."""
+    if not img_url:
+        return ""
+    dest = THUMBNAILS_DIR / f"{slug[:60]}.jpg"
+    if await download_thumbnail(img_url, dest):
+        try:
+            return str(dest.relative_to(VAULT_PATH))
+        except ValueError:
+            return ""
+    return ""
 
 WEEKLY_SECONDS = 7 * 24 * 60 * 60
 MAX_MODEL_BUTTONS = 30
@@ -415,19 +431,23 @@ async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _link_job(update, context, url, status):
     """Scrape a public URL and turn it into a knowledge note (under deadline)."""
-    content = await parse_link(url)
+    content, og_image = await parse_link_with_meta(url)
     if not content:
         await status.fail(
             "Could not read the link (it may block bots).\n"
             "Tip: copy the page text and send it here instead — I'll turn it into a note."
         )
         return
+    thumb_rel = await _fetch_thumbnail(
+        og_image, hashlib.sha1(url.encode()).hexdigest()[:16]
+    )
     detail = context.user_data.get("detail_level") or "summarize"
     await analyze_and_save(
         update, context, content, detail,
         source=url, source_type="link", source_kind="document",
         fingerprint=compute_url_fingerprint(url),
         force=_wants_force(url),
+        thumbnail=thumb_rel,
     )
 
 
@@ -596,6 +616,13 @@ async def _youtube_job(update, context, url, video_id, detail, fingerprint, stat
     author = meta.get("author", "")
     await status.update(f"🧠 Summarizing “{title[:60]}”…")
 
+    # Predictable YouTube thumbnail — download best-effort (Task 9)
+    thumb_rel = ""
+    if video_id:
+        thumb_rel = await _fetch_thumbnail(
+            f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg", video_id
+        )
+
     payload = (
         f"Video URL: {url}\nTitle: {title}\nChannel: {author}\n\n"
         f"Transcript:\n{transcript[:50000]}"
@@ -608,13 +635,17 @@ async def _youtube_job(update, context, url, video_id, detail, fingerprint, stat
     tags = note_dict.get("tags", [])
     if "video" not in tags:
         tags.insert(0, "video")
+    body = note_dict.get("content", "")
+    if thumb_rel:
+        body = f"![[{thumb_rel}]]\n\n{body}"
     note_dict.update(
         {
             "tags": tags,
             "source": url,
             "source_type": "video",
             "detail_level": detail,
-            "content": f"🔗 {url}\n📺 {title}" + (f" — {author}" if author else "") + f"\n\n{note_dict.get('content','')}",
+            "thumbnail": thumb_rel,
+            "content": f"🔗 {url}\n📺 {title}" + (f" — {author}" if author else "") + f"\n\n{body}",
         }
     )
 
@@ -803,6 +834,7 @@ async def analyze_and_save(
     update, context, text, detail_level, source, source_type,
     attachment=None, source_kind=None,
     fingerprint: str = "", force: bool = False,
+    thumbnail: str = "",
 ):
     """Run AI analysis and persist the resulting knowledge note."""
     if await _reject_duplicate(update, fingerprint, force):
@@ -831,6 +863,9 @@ async def analyze_and_save(
     note_dict["source"] = source
     note_dict["source_type"] = source_type
     note_dict["attachment"] = attachment
+    if thumbnail:
+        note_dict["thumbnail"] = thumbnail
+        note_dict["content"] = f"![[{thumbnail}]]\n\n{note_dict.get('content', '')}"
 
     note_path = write_note_to_vault(note_dict)
     if not note_path:
