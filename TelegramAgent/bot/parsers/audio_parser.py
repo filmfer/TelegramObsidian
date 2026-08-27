@@ -76,3 +76,44 @@ async def transcribe_audio(file_path: str, language: Optional[str] = None) -> st
     except Exception as e:
         logger.error(f"Groq transcription failed: {e}")
         raise TranscriptionError(f"Transcription failed: {e}")
+
+
+# ---- Local transcription (free, no size limit) ----
+
+_LOCAL_WHISPER = None
+
+
+def get_local_whisper_model(model_name: Optional[str] = None):
+    """Lazily load faster-whisper (CPU). Caches the loaded model in-process."""
+    global _LOCAL_WHISPER
+    model_name = model_name or os.getenv("WHISPER_MODEL", "base")
+    if _LOCAL_WHISPER is None:
+        from faster_whisper import WhisperModel  # lazy import
+
+        _LOCAL_WHISPER = WhisperModel(model_name, device="cpu", compute_type="int8")
+    return _LOCAL_WHISPER
+
+
+def transcribe_audio_local(file_path: str, language: Optional[str] = None) -> str:
+    """
+    Transcribe audio locally with faster-whisper (int8 CPU).
+
+    Designed for LONG files (e.g. 90-min YouTube audio) — there is no upload
+    size cap and no API cost. Slower than Groq but fully free and private.
+    Ramps through the file in a single pass.
+    """
+    model = get_local_whisper_model()
+    lang = (language or os.getenv("WHISPER_LANGUAGE") or "en")[:2]
+    try:
+        segments, _info = model.transcribe(file_path, language=lang, beam_size=5)
+        parts = [seg.text.strip() for seg in segments if seg.text and seg.text.strip()]
+        text = " ".join(parts).strip()
+        if not text:
+            raise TranscriptionError("Local transcription came back empty.")
+        logger.info(f"Local transcribed {Path(file_path).name}: {len(text)} chars")
+        return text
+    except TranscriptionError:
+        raise
+    except Exception as e:
+        logger.error(f"Local Whisper transcription failed: {e}")
+        raise TranscriptionError(f"Local transcription failed: {e}")

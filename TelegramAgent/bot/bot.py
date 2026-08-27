@@ -28,9 +28,14 @@ from parsers.book_parser import (
     is_book_file,
     split_into_chunks,
 )
-from parsers.audio_parser import TranscriptionError, transcribe_audio
+from parsers.audio_parser import (
+    TranscriptionError,
+    transcribe_audio,
+    transcribe_audio_local,
+)
 from parsers.search_parser import search_web
 from parsers.video_parser import (
+    download_youtube_audio,
     extract_audio_track,
     extract_youtube_id,
     fetch_youtube_metadata,
@@ -656,15 +661,24 @@ async def _process_youtube(update, context, url):
 
 
 async def _youtube_job(update, context, url, video_id, detail, fingerprint, status):
-    """Fetch transcript → summarize → write note (under deadline)."""
+    """Fetch transcript → summarize → write note (under deadline).
+    Free caption fallback chain: youtube-transcript-api → yt-dlp subtitles
+    → (last resort) download audio + local faster-whisper transcription.
+    """
     meta, transcript = {}, None
     if video_id:
         meta = await asyncio.to_thread(fetch_youtube_metadata, video_id)
+        await status.update("🎬 Fetching video transcript…")
         transcript = await asyncio.to_thread(fetch_youtube_transcript, video_id)
+
+    # Layer 3 — no captions at all: pull the audio and transcribe it (free)
+    if not transcript and video_id:
+        await status.update("🎬 No captions found — transcribing audio…")
+        transcript = await _yt_audio_fallback(video_id)
 
     if not transcript:
         await status.fail(
-            "No transcript available for this video (captions may be disabled).\n"
+            "Could not extract any transcript/captions for this video.\n"
             "Tip: upload the video file here and I'll transcribe the audio instead."
         )
         return
@@ -712,6 +726,35 @@ async def _youtube_job(update, context, url, video_id, detail, fingerprint, stat
         return
     await arecord_processed(fingerprint, "video", url, note_path)
     await status.update(f"🎬 Video note saved!\n📂 {note_path}\n📝 {note_dict.get('title')}")
+
+
+async def _yt_audio_fallback(video_id: str) -> Optional[str]:
+    """Layer 3: download audio (yt-dlp) + transcribe free (Groq, then local)."""
+    import tempfile
+
+    proxy = os.getenv("YOUTUBE_PROXY_URL") or None
+    with tempfile.TemporaryDirectory() as tmp:
+        mp3 = str(Path(tmp) / "audio.mp3")
+        ok = await asyncio.to_thread(download_youtube_audio, video_id, mp3, proxy)
+        if not ok:
+            logger.warning(f"yt-dlp audio download failed for {video_id}")
+            return None
+        # yt-dlp may keep the native container extension (m4a/webm/opus)
+        for ext in (".mp3", ".m4a", ".webm", ".opus", ".oga", ".mkv"):
+            p = Path(tmp) / f"audio{ext}"
+            if p.is_file():
+                mp3 = str(p)
+                break
+        try:
+            return await asyncio.to_thread(transcribe_audio, mp3)  # Groq (fast)
+        except TranscriptionError as e:
+            logger.warning(f"Groq transcription of YouTube audio failed: {e}")
+            try:
+                # free local fallback for long files (no size cap)
+                return await asyncio.to_thread(transcribe_audio_local, mp3)
+            except TranscriptionError as e2:
+                logger.error(f"Local transcription failed too: {e2}")
+                return None
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):

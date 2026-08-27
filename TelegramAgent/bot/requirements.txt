@@ -16,3 +16,5 @@ defusedxml==0.7.1
 ddgs==9.8.0
 cloudscraper==1.2.71
 youtube-transcript-api==1.2.4
+yt-dlp==2025.10.14
+faster-whisper==1.2.1
