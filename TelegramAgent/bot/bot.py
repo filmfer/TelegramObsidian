@@ -63,6 +63,10 @@ from storage.dedup_store import (
     compute_text_fingerprint,
     compute_url_fingerprint,
     init_db,
+    pending_add,
+    pending_clear,
+    pending_expire,
+    pending_list,
 )
 from notifications import (
     StatusMessage,
@@ -99,6 +103,10 @@ DETAIL_LEVELS = {"summarize", "detailed", "precise", "raw", "book"}
 USER_COOLDOWN_SECONDS = 10
 _user_last_request: dict = {}
 
+# /text + /voice pending queue (Task 4) — survives restarts via SQLite
+STAGING_DIR = Path(os.getenv("STAGING_DIR", "data/staging"))
+PENDING_QUEUE_TTL_HOURS = int(os.getenv("PENDING_QUEUE_TTL_HOURS", "24"))
+
 
 def _wants_force(text: Optional[str]) -> bool:
     """True when the user appended '--force' to a caption/message."""
@@ -132,11 +140,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Documents (PDF/DOCX/XLSX/TXT/JSON/MD/CSV/EML)\n"
         "• E-books (EPUB/MOBI/AZW/DJVU/FB2/LIT) → deep study notes\n"
         "• Links (https://…)\n"
-        "• Plain text thoughts — structured & categorized by AI\n"
-        "• Voice messages 🎙️ — transcribed into notes\n\n"
+        "• Plain text thoughts — queued, then /text creates the note\n"
+        "• Voice messages 🎙️ — queued, then /voice transcribes & notes\n\n"
+        "/text — build a note from queued text messages\n"
+        "/voice — transcribe queued audio into a note\n"
+        "/queue — see what's waiting\n"
         "/research <topic> — deep web research, cited sources\n"
         "Detail levels: /summarize /detailed /precise /raw /book\n"
-        "LLM models: /models"
+        "LLM models: /models\n\n"
+        "Duplicates are detected automatically — send with '--force' to override."
     )
 
 
@@ -304,10 +316,101 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await run_with_deadline(status, _link_job(update, context, text, status))
         return
 
-    # --- Personal text note (#3): structure + categorize the user's thought ---
+    # --- Queue plain text for /text (Task 4): nothing is lost, user batches ---
+    n = await asyncio.to_thread(pending_add, update.effective_chat.id, "text", text)
+    await update.message.reply_text(
+        f"📝 Text queued ({n} in the queue).\n"
+        "Keep sending messages to accumulate, or /text to create the note now."
+    )
+
+
+async def text_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Combine every queued text message into one structured note."""
+    chat_id = update.effective_chat.id
+    await asyncio.to_thread(pending_expire, PENDING_QUEUE_TTL_HOURS)
+    items = await asyncio.to_thread(pending_list, chat_id, "text")
+    if not items:
+        await update.message.reply_text(
+            "📭 No queued text messages. Send me plain text first, then /text."
+        )
+        return
+
+    combined = "\n\n---\n\n".join(
+        f"[{it['received_at']}]\n{it['content']}" for it in items
+    )
     detail = context.user_data.get("detail_level", "detailed")
-    status = StatusMessage(await update.message.reply_text("📝 Creating your note…"))
-    await run_with_deadline(status, _text_note_job(update, context, text, detail, status))
+    status = StatusMessage(
+        await update.message.reply_text(f"📝 Creating your note from {len(items)} messages…")
+    )
+    await run_with_deadline(status, _text_note_job(update, context, combined[:12000], detail, status))
+    await asyncio.to_thread(pending_clear, chat_id, "text")
+
+
+async def voice_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Transcribe every queued audio, merge, and create one note."""
+    chat_id = update.effective_chat.id
+    await asyncio.to_thread(pending_expire, PENDING_QUEUE_TTL_HOURS)
+    items = await asyncio.to_thread(pending_list, chat_id, "voice")
+    if not items:
+        await update.message.reply_text(
+            "📭 No queued audio messages. Send me a voice note first, then /voice."
+        )
+        return
+
+    status = StatusMessage(
+        await update.message.reply_text(f"🎙️ Transcribing {len(items)} audio(s)…")
+    )
+    await run_with_deadline(status, _voice_queue_job(update, context, items, status))
+
+
+async def _voice_queue_job(update, context, items, status):
+    """Transcribe queued audio files sequentially, then build a merged note."""
+    transcripts = []
+    for i, item in enumerate(items, 1):
+        path = item["content"]
+        if not Path(path).is_file():
+            transcripts.append(f"[{item['received_at']}]\n(staging file missing — skipped)")
+            continue
+        try:
+            await status.update(f"🎙️ Transcribing audio {i}/{len(items)}…")
+            transcripts.append(f"[{item['received_at']}]\n{await transcribe_audio(path)}")
+        except TranscriptionError as e:
+            logger.error(f"Queued audio {i} transcription failed: {e}")
+            transcripts.append(f"[{item['received_at']}]\n(transcription failed: {e})")
+
+    combined = "\n\n---\n\n".join(transcripts)[:12000]
+    detail = context.user_data.get("detail_level", "detailed")
+    await status.update("✍️ Creating your note…")
+    await analyze_and_save(
+        update, context, combined, detail,
+        source="telegram-voice::queued batch",
+        source_type="voice",
+        source_kind="text",
+        fingerprint=compute_text_fingerprint(combined),
+    )
+
+    # Cleanup: clear the queue + remove staging files
+    await asyncio.to_thread(pending_clear, update.effective_chat.id, "voice")
+    for item in items:
+        try:
+            Path(item["content"]).unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("Could not delete staging file: %s", e)
+
+
+async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show how many items are waiting in the /text and /voice queues."""
+    chat_id = update.effective_chat.id
+    await asyncio.to_thread(pending_expire, PENDING_QUEUE_TTL_HOURS)
+    texts = await asyncio.to_thread(pending_list, chat_id, "text")
+    voices = await asyncio.to_thread(pending_list, chat_id, "voice")
+    await update.message.reply_text(
+        f"📋 Queued for this chat:\n"
+        f"📝 Text: {len(texts)} → /text to process\n"
+        f"🎙️ Audio: {len(voices)} → /voice to process\n\n"
+        "Items expire after "
+        f"{PENDING_QUEUE_TTL_HOURS}h."
+    )
 
 
 async def _link_job(update, context, url, status):
@@ -343,7 +446,7 @@ async def _text_note_job(update, context, text, detail, status):
 # ---- Voice notes (#4) ----
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Transcribe Telegram voice/audio via free Groq Whisper, then note it."""
+    """Voice/audio is queued for /voice; captions with 'research' run instantly."""
     user_id = update.effective_user.id if update.effective_user else 0
     if not _check_rate_limit(user_id):
         await update.message.reply_text(
@@ -352,41 +455,47 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     media = update.message.voice or update.message.audio
-    status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
-    await run_with_deadline(status, _voice_job(update, media, status))
+    caption = (update.message.caption or "").strip()
+
+    # Instant research flow kept for backward compatibility
+    if "research" in caption.lower():
+        status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
+        await run_with_deadline(status, _voice_research_job(update, context, media, status))
+        return
+
+    # --- Queue for /voice (Task 4): nothing is lost, user batches ---
+    chat_id = update.effective_chat.id
+    staging = STAGING_DIR / str(chat_id)
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        file_obj = await media.get_file()
+        local_path = await file_obj.download_to_drive(staging)
+    except Exception as e:
+        logger.error(f"Could not download queued audio: {e}")
+        await update.message.reply_text("❌ Could not download the audio. Try again.")
+        return
+
+    n = await asyncio.to_thread(pending_add, chat_id, "voice", str(local_path))
+    await update.message.reply_text(
+        f"🎙️ Audio queued ({n} in the queue).\n"
+        "Keep sending more, or /voice to transcribe and create the note."
+    )
 
 
-async def _voice_job(update, media, status):
-    """Download → transcribe → analyze (runs under the task deadline)."""
+async def _voice_research_job(update, context, media, status):
+    """Download → transcribe → deep research (kept for 'research' captions)."""
     with tempfile.TemporaryDirectory() as tmp:
         file_obj = await media.get_file()
         local_path = await file_obj.download_to_drive(tmp)
-        fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
         try:
             transcript = await transcribe_audio(local_path)
         except TranscriptionError as e:
             await status.fail(f"Transcription failed: {e}")
             return
 
-    caption = (update.message.caption or "").strip()
-    want_research = "research" in caption.lower()
-    detail = derive_detail_level(caption) if caption else context.user_data.get("detail_level", "detailed")
-
     preview = transcript[:300] + ("…" if len(transcript) > 300 else "")
-    await status.update(f"🎙️ Transcribed:\n\n{preview}\n\n✍️ Creating your note…")
-
-    if want_research:
-        await _research_topic(update, context, transcript[:500], status)
-        return
-
-    await analyze_and_save(
-        update, context, transcript, detail,
-        source="telegram-voice::transcription",
-        source_type="voice",
-        source_kind="text",
-        fingerprint=fingerprint,
-        force=_wants_force(caption),
-    )
+    await status.update(f"🎙️ Transcribed:\n\n{preview}\n\n🔎 Researching…")
+    await _research_topic(update, context, transcript[:500], status)
 
 
 # ---- Deep research (#2) ----
@@ -811,6 +920,9 @@ def main():
     app.add_handler(CommandHandler("help", start_command))
     app.add_handler(CommandHandler("models", models_command))
     app.add_handler(CommandHandler("research", research_command))
+    app.add_handler(CommandHandler("text", text_note_command))
+    app.add_handler(CommandHandler("voice", voice_note_command))
+    app.add_handler(CommandHandler("queue", queue_command))
     for cmd in ("summarize", "detailed", "precise", "raw", "book"):
         app.add_handler(CommandHandler(cmd, set_detail_command))
     app.add_handler(CallbackQueryHandler(model_choice_callback, pattern=r"^swm:\d+$"))

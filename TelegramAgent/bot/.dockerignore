@@ -20,6 +20,10 @@ __pycache__/
 sample_test_doc.txt
 tests/
 
+# Runtime state (dedup DB, staging, logs)
+data/
+logs/
+
 # IDE
 .idea/
 .vscode/
