@@ -64,6 +64,12 @@ from storage.dedup_store import (
     compute_url_fingerprint,
     init_db,
 )
+from notifications import (
+    StatusMessage,
+    on_error,
+    run_with_deadline,
+    setup_error_logging,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -222,6 +228,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No valid document received.")
         return
 
+    status = StatusMessage(await update.message.reply_text("🔄 Processing document…"))
+    await run_with_deadline(
+        status, _document_job(update, file_obj, caption, detail_level, status)
+    )
+
+
+async def _document_job(update, file_obj, caption, detail_level, status):
+    """Download → dedup-check → parse/book-route → analyze (under deadline)."""
     with tempfile.TemporaryDirectory() as tmp:
         local_path = await file_obj.download_to_drive(tmp)
         fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
@@ -286,24 +300,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_youtube_url(text):
             await _process_youtube(update, context, text)
             return
-        content = await parse_link(text)
-        if not content:
-            await update.message.reply_text(
-                "❌ Could not read the link (it may block bots).\n"
-                "Tip: copy the page text and send it here instead — I'll turn it into a note."
-            )
-            return
-        detail = context.user_data.get("detail_level") or "summarize"
-        await analyze_and_save(
-            update, context, content, detail,
-            source=text, source_type="link", source_kind="document",
-            fingerprint=compute_url_fingerprint(text),
-            force=_wants_force(text),
-        )
+        status = StatusMessage(await update.message.reply_text("🔄 Reading link…"))
+        await run_with_deadline(status, _link_job(update, context, text, status))
         return
 
     # --- Personal text note (#3): structure + categorize the user's thought ---
     detail = context.user_data.get("detail_level", "detailed")
+    status = StatusMessage(await update.message.reply_text("📝 Creating your note…"))
+    await run_with_deadline(status, _text_note_job(update, context, text, detail, status))
+
+
+async def _link_job(update, context, url, status):
+    """Scrape a public URL and turn it into a knowledge note (under deadline)."""
+    content = await parse_link(url)
+    if not content:
+        await status.fail(
+            "Could not read the link (it may block bots).\n"
+            "Tip: copy the page text and send it here instead — I'll turn it into a note."
+        )
+        return
+    detail = context.user_data.get("detail_level") or "summarize"
+    await analyze_and_save(
+        update, context, content, detail,
+        source=url, source_type="link", source_kind="document",
+        fingerprint=compute_url_fingerprint(url),
+        force=_wants_force(url),
+    )
+
+
+async def _text_note_job(update, context, text, detail, status):
+    """Turn a plain-text thought into a structured, categorized note."""
     await analyze_and_save(
         update, context, text[:12000], detail,
         source="telegram-text::manual note",
@@ -326,8 +352,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     media = update.message.voice or update.message.audio
-    status = await update.message.reply_text("🎙️ Transcribing audio…")
+    status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
+    await run_with_deadline(status, _voice_job(update, media, status))
 
+
+async def _voice_job(update, media, status):
+    """Download → transcribe → analyze (runs under the task deadline)."""
     with tempfile.TemporaryDirectory() as tmp:
         file_obj = await media.get_file()
         local_path = await file_obj.download_to_drive(tmp)
@@ -335,7 +365,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             transcript = await transcribe_audio(local_path)
         except TranscriptionError as e:
-            await status.edit_text(f"❌ Transcription failed: {e}")
+            await status.fail(f"Transcription failed: {e}")
             return
 
     caption = (update.message.caption or "").strip()
@@ -343,7 +373,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     detail = derive_detail_level(caption) if caption else context.user_data.get("detail_level", "detailed")
 
     preview = transcript[:300] + ("…" if len(transcript) > 300 else "")
-    await status.edit_text(f"🎙️ Transcribed:\n\n{preview}\n\n✍️ Creating your note…")
+    await status.update(f"🎙️ Transcribed:\n\n{preview}\n\n✍️ Creating your note…")
 
     if want_research:
         await _research_topic(update, context, transcript[:500], status)
@@ -369,25 +399,26 @@ async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Usage: /research <topic>\nExample: /research best linux hardening practices 2026"
         )
         return
-    status = await update.message.reply_text(f"🔎 Researching “{topic}”…")
-    await _research_topic(update, context, topic, status)
+    status = StatusMessage(await update.message.reply_text(f"🔎 Researching “{topic}”…"))
+    await run_with_deadline(status, _research_topic(update, context, topic, status))
 
 
 async def _research_topic(update, context, topic, status):
-    """Search web → scrape top sources → LLM synthesis → cited note."""
+    """Search web → scrape top sources → LLM synthesis → cited note.
+    `status` is a notifications.StatusMessage."""
     fingerprint = compute_text_fingerprint(topic)
     if await _reject_duplicate(update, fingerprint, _wants_force(topic)):
         return
     results = await asyncio.to_thread(search_web, topic, 5)
     if not results:
-        await status.edit_text("❌ No search results found for this topic.")
+        await status.fail("No search results found for this topic.")
         return
 
     sources_payload = []
     for r in results[:4]:
         title = r.get("title") or r.get("url", "")[:60]
         try:
-            await status.edit_text(f"🔎 Reading: {title[:60]}…")
+            await status.update(f"🔎 Reading: {title[:60]}…")
             content = await parse_link(r["url"]) or ""
         except Exception:
             content = ""
@@ -397,12 +428,12 @@ async def _research_topic(update, context, topic, status):
     prompt = RESEARCH_PROMPT.format(topic=topic, categories=CATEGORIES)
     payload = "\n\n---\n\n".join(sources_payload)
 
-    await status.edit_text("🧠 Synthesizing research…")
+    await status.update("🧠 Synthesizing research…")
     note_text = await chat(prompt, payload, max_tokens=6000)
 
     note_dict = _parse_response(note_text)
     if not note_dict:
-        await status.edit_text("❌ Research synthesis failed.")
+        await status.fail("Research synthesis failed.")
         return
 
     tags = note_dict.get("tags", [])
@@ -415,12 +446,11 @@ async def _research_topic(update, context, topic, status):
 
     note_path = write_note_to_vault(note_dict)
     if not note_path:
-        await status.edit_text("❌ Could not write to Obsidian vault.")
+        await status.fail("Could not write to Obsidian vault.")
         return
     await arecord_processed(fingerprint, "research", f"research::{topic}", note_path)
-    await status.edit_text(
-        f"🔎 Research saved!\n📂 {note_path}\n📝 {note_dict.get('title')}",
-        disable_web_page_preview=True,
+    await status.update(
+        f"🔎 Research saved!\n📂 {note_path}\n📝 {note_dict.get('title')}"
     )
 
 
@@ -433,23 +463,29 @@ async def _process_youtube(update, context, url):
     fingerprint = compute_url_fingerprint(url)
     if await _reject_duplicate(update, fingerprint, _wants_force(url)):
         return
-    status = await update.message.reply_text("🎬 Fetching video transcript…")
+    status = StatusMessage(await update.message.reply_text("🎬 Fetching video transcript…"))
+    await run_with_deadline(
+        status, _youtube_job(update, context, url, video_id, detail, fingerprint, status)
+    )
 
+
+async def _youtube_job(update, context, url, video_id, detail, fingerprint, status):
+    """Fetch transcript → summarize → write note (under deadline)."""
     meta, transcript = {}, None
     if video_id:
         meta = await asyncio.to_thread(fetch_youtube_metadata, video_id)
         transcript = await asyncio.to_thread(fetch_youtube_transcript, video_id)
 
     if not transcript:
-        await status.edit_text(
-            "❌ No transcript available for this video (captions may be disabled).\n"
+        await status.fail(
+            "No transcript available for this video (captions may be disabled).\n"
             "Tip: upload the video file here and I'll transcribe the audio instead."
         )
         return
 
     title = meta.get("title") or f"Video {video_id}"
     author = meta.get("author", "")
-    await status.edit_text(f"🧠 Summarizing “{title[:60]}”…")
+    await status.update(f"🧠 Summarizing “{title[:60]}”…")
 
     payload = (
         f"Video URL: {url}\nTitle: {title}\nChannel: {author}\n\n"
@@ -457,7 +493,7 @@ async def _process_youtube(update, context, url):
     )
     note_dict = _parse_response(await chat(VIDEO_PROMPT.format(categories=CATEGORIES), payload, max_tokens=6000))
     if not note_dict:
-        await status.edit_text("❌ Video summarization failed.")
+        await status.fail("Video summarization failed.")
         return
 
     tags = note_dict.get("tags", [])
@@ -475,10 +511,10 @@ async def _process_youtube(update, context, url):
 
     note_path = write_note_to_vault(note_dict)
     if not note_path:
-        await status.edit_text("❌ Could not write to Obsidian vault.")
+        await status.fail("Could not write to Obsidian vault.")
         return
     await arecord_processed(fingerprint, "video", url, note_path)
-    await status.edit_text(f"🎬 Video note saved!\n📂 {note_path}\n📝 {note_dict.get('title')}", disable_web_page_preview=True)
+    await status.update(f"🎬 Video note saved!\n📂 {note_path}\n📝 {note_dict.get('title')}")
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -497,29 +533,34 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    status = await update.message.reply_text("🎬 Downloading & extracting audio track…")
+    status = StatusMessage(await update.message.reply_text("🎬 Downloading & extracting audio track…"))
+    await run_with_deadline(status, _video_job(update, video, status))
+
+
+async def _video_job(update, video, status):
+    """Download → ffmpeg audio → Whisper → summarize (under deadline)."""
     with tempfile.TemporaryDirectory() as tmp:
         file_obj = await video.get_file()
         local_path = await file_obj.download_to_drive(tmp)
         fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
-        if await _reject_duplicate(update, fingerprint, _wants_force(caption := (update.message.caption or "").strip())):
+        caption = (update.message.caption or "").strip()
+        if await _reject_duplicate(update, fingerprint, _wants_force(caption)):
             return
         out_mp3 = str(Path(tmp) / "audio.mp3")
         try:
             await asyncio.to_thread(extract_audio_track, local_path, out_mp3)
         except RuntimeError as e:
-            await status.edit_text(f"❌ {e}")
+            await status.fail(str(e))
             return
         try:
             transcript = await transcribe_audio(out_mp3)
         except TranscriptionError as e:
-            await status.edit_text(f"❌ Transcription failed: {e}")
+            await status.fail(f"Transcription failed: {e}")
             return
 
-    caption = (update.message.caption or "").strip()
     detail = derive_detail_level(caption) if caption else context.user_data.get("detail_level", "detailed")
 
-    await status.edit_text("🧠 Summarizing video content…")
+    await status.update("🧠 Summarizing video content…")
     await analyze_and_save(
         update, context, transcript[:40000], detail,
         source=f"telegram-video::{Path(local_path).name}",
@@ -758,6 +799,7 @@ async def post_init(application: Application):
 
 def main():
     """Start the Telegram bot."""
+    setup_error_logging()
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
@@ -778,8 +820,21 @@ def main():
         MessageHandler(filters.VIDEO | (filters.Document.VIDEO & filters.Document.ALL), handle_video)
     )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Catch-all: any content type no handler claimed gets an answer (Task 8)
+    app.add_handler(MessageHandler(filters.ALL, handle_unsupported))
+    app.add_error_handler(on_error)
     logger.info("Bot started. Current LLM model: %s", get_current_model())
     app.run_polling()
+
+
+async def handle_unsupported(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reply to content types the bot can't process yet (photos, stickers…)."""
+    if update.message and not update.message.text:
+        await update.message.reply_text(
+            "🤔 I can't process this content type yet.\n"
+            "Supported: documents (PDF/DOCX/XLSX/TXT/JSON/MD/CSV/EML), links, "
+            "e-books, voice/audio, video files and video links."
+        )
 
 
 if __name__ == "__main__":

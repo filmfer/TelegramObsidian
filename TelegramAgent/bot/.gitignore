@@ -10,3 +10,6 @@ config.json
 
 # Dedup + pending-queue SQLite database
 data/
+
+# Rotating application logs
+logs/
