@@ -176,7 +176,9 @@ cd TelegramAgent/bot && docker compose up -d --build
 | `DEDUP_DB_PATH` | `data/agent.db` | SQLite dedup + queue store |
 | `PENDING_QUEUE_TTL_HOURS` | `24` | expiry for `/text`/`/voice` queue items |
 | `TASK_TIMEOUT_SECONDS` | `600` | hard cap per task |
-| `TASK_WARN_SECONDS` | `100` | "still working" checkpoint |
+| `TASK_WARN_SECONDS` | `100` | \"still working\" checkpoint |
+| `DISK_WARN_THRESHOLD_PCT` | `20` | alert threshold (% free) |
+| `DISK_ALERT_MINUTES` | `60` | anti-spam cooldown for proactive alerts |
 | `STAGING_DIR` | `data/staging` | queued audio staging area |
 | `CATEGORY_TAXONOMY_PATH` | `config/category_taxonomy.yaml` | `/organize` rules |
 | `LOG_DIR` | `logs` | rotating log files |
@@ -193,6 +195,7 @@ cd TelegramAgent/bot && docker compose up -d --build
 | Notes written but DB/Drive never syncs; `ls` shows **`Input/output error`** on the mount | The rclone mount has **no VFS cache** — writes don't settle. Fix the unit: add `--vfs-cache-mode writes --buffer-size 64M --vfs-read-ahead 128M --dir-cache-time 1m` to `ExecStart` and `systemctl restart`. No re-auth needed. |
 | `/organize` finds no candidates | All folders are at/above `threshold` or protected — tune `config/category_taxonomy.yaml`. |
 | Voice note gets no answer | Check `GROQ_API_KEY` (Whisper); transcription errors are always reported. |
+| `/disk` | Manual disk report. Proactive alert + inline note warning when free space < `DISK_WARN_THRESHOLD_PCT`%. |
 | rclone mount down | `systemctl status rclone-gdrive --no-pager` · `sudo rclone lsd gdrive:` |
 
 ---

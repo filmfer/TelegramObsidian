@@ -81,6 +81,15 @@ from notifications import (
     run_with_deadline,
     setup_error_logging,
 )
+from disk_health import (
+    DEFAULT_ALERT_MINUTES,
+    disk_alert_text,
+    format_disk,
+    free_percent,
+    low_disk,
+)
+
+DISK_JOB_HOURS = 6  # proactive re-check interval
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,6 +124,9 @@ _user_last_request: dict = {}
 # /text + /voice pending queue (Task 4) — survives restarts via SQLite
 STAGING_DIR = Path(os.getenv("STAGING_DIR", "data/staging"))
 PENDING_QUEUE_TTL_HOURS = int(os.getenv("PENDING_QUEUE_TTL_HOURS", "24"))
+# Disk-warning cooldown (Task: low-disk alerts)
+_last_disk_alert: float = 0.0
+DISK_ALERT_SECONDS = DEFAULT_ALERT_MINUTES * 60
 
 
 def _wants_force(text: Optional[str]) -> bool:
@@ -169,7 +181,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/queue — see what's waiting\n"
         "/research <topic> — deep web research, cited sources\n"
         "Detail levels: /summarize /detailed /precise /raw /book\n"
-        "LLM models: /models\n\n"
+                "LLM models: /models\n"
+        "/disk — check vault disk space\n\n"
         "Duplicates are detected automatically — send with '--force' to override."
     )
 
@@ -422,7 +435,6 @@ async def _voice_queue_job(update, context, items, status):
 
 async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show how many items are waiting in the /text and /voice queues."""
-    chat_id = update.effective_chat.id
     await asyncio.to_thread(pending_expire, PENDING_QUEUE_TTL_HOURS)
     texts = await asyncio.to_thread(pending_list, chat_id, "text")
     voices = await asyncio.to_thread(pending_list, chat_id, "voice")
@@ -996,8 +1008,11 @@ async def analyze_and_save(
         await arecord_processed(fingerprint, source_type, source, note_path)
 
     preview = (note_dict.get("content") or "")[:400]
+    msg = f"✅ Saved to vault!\n📂 {note_path}\n\n📝 {note_dict.get('title')}\n---\n{preview}"
+    if low_disk(VAULT_PATH):
+        msg += f"\n\n⚠️ Disk space low: {format_disk(VAULT_PATH)}"
     await update.message.reply_text(
-        f"✅ Saved to vault!\n📂 {note_path}\n\n📝 {note_dict.get('title')}\n---\n{preview}",
+        msg,
         disable_web_page_preview=True,
     )
 
@@ -1040,14 +1055,59 @@ async def weekly_model_check_job(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Could not deliver model-check report: {e}")
 
 
+# ---- Disk-space monitoring (Task: warn when free space < 20%) ----
+
+async def disk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual /disk — report current vault disk usage."""
+    pct = await asyncio.to_thread(free_percent, VAULT_PATH)
+    if pct is None:
+        await update.message.reply_text("Could not read disk stats.")
+        return
+    text = format_disk(VAULT_PATH)
+    if pct * 100 < float(os.getenv("DISK_WARN_THRESHOLD_PCT", "20")):
+        await update.message.reply_text(f"Low disk!\n{text}")
+    else:
+        await update.message.reply_text(f"Disk OK\n{text}")
+
+
+async def disk_check_job(context: ContextTypes.DEFAULT_TYPE):
+    """Runs every DISK_JOB_HOURS: proactively alert if disk is low (anti-spam)."""
+    await _maybe_send_disk_alert(context.bot)
+
+
+async def _maybe_send_disk_alert(bot):
+    """Send one proactive alert if disk is low AND the anti-spam cooldown elapsed."""
+    global _last_disk_alert
+    if not low_disk(VAULT_PATH):
+        return
+    now = time.time()
+    if now - _last_disk_alert < DEFAULT_ALERT_MINUTES * 60:
+        return  # too soon since last alert
+    _last_disk_alert = now
+    text = disk_alert_text(VAULT_PATH)
+    chat_id = TELEGRAM_CHAT_ID
+    if chat_id:
+        try:
+            await bot.send_message(chat_id=int(chat_id), text=text)
+        except Exception as e:
+            logger.error(f"Could not send disk alert: {e}")
+
+
 async def post_init(application: Application):
-    """Startup tasks: schedule the weekly job + run first check immediately."""
+    """Startup tasks: schedule jobs + run first check immediately."""
     if application.job_queue:
         application.job_queue.run_repeating(
             weekly_model_check_job,
             interval=WEEKLY_SECONDS,
             first=20,
             name="weekly_model_check",
+            data={"chat_id": TELEGRAM_CHAT_ID},
+        )
+        application.job_queue.run_repeating(
+            disk_check_job,
+            interval=DISK_JOB_HOURS * 3600,
+            first=45,
+            name="disk_check",
             data={"chat_id": TELEGRAM_CHAT_ID},
         )
     try:
@@ -1059,6 +1119,9 @@ async def post_init(application: Application):
             )
     except Exception as e:
         logger.warning(f"Startup model check failed: {e}")
+
+    # Initial disk check (sends an alert immediately if already low).
+    await _maybe_send_disk_alert(application.bot)
 
 
 def main():
@@ -1074,8 +1137,7 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", start_command))
     app.add_handler(CommandHandler("models", models_command))
-    app.add_handler(CommandHandler("research", research_command))
-    app.add_handler(CommandHandler("text", text_note_command))
+    app.add_handler(CommandHandler("disk", disk_command))
     app.add_handler(CommandHandler("voice", voice_note_command))
     app.add_handler(CommandHandler("queue", queue_command))
     app.add_handler(CommandHandler("organize", organize_command))
