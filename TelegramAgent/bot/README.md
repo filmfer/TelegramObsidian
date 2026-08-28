@@ -25,6 +25,7 @@ parsers/book_parser.py     e-book metadata + text (PDF/EPUB/MOBI/AZW/AZW3/AZW4/D
 parsers/audio_parser.py    Groq Whisper transcription
 parsers/video_parser.py    YouTube metadata/transcript; uploaded video → ffmpeg audio
 parsers/search_parser.py   DuckDuckGo search for /research
+disk_health.py             Disk-space monitoring (free space < 20% alerts)
 storage/vault_writer.py    sanitized note writing + YAML frontmatter + CATEGORY_MAP
 storage/dedup_store.py     SQLite fingerprints (dedup) + /text · /voice pending queue
 storage/vault_organizer.py /organize merge engine
@@ -66,6 +67,7 @@ data/agent.db              SQLite state (dedup + queues) — outside the vault o
 | `/text` | Turn every queued text message into **one** note |
 | `/voice` | Transcribe every queued audio into **one** note |
 | `/queue` | See what's waiting (items expire after `PENDING_QUEUE_TTL_HOURS`, default 24h) |
+| `/disk` | Check vault disk usage & warnings if space < 20% |
 | `/research <topic>` | Deep web research with cited sources |
 | `/models` | List working LLM models, tap to switch instantly |
 | `/organize preview` | Show which sparse category folders would be merged |

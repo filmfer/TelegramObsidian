@@ -5,7 +5,7 @@
 > **Turn Telegram into your personal knowledge capture pipeline.** Send documents, links, and e-books to a bot — get clean, AI-categorized Markdown notes in your Obsidian vault, synced across all your devices.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v1.0.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
+[![Release](https://img.shields.io/badge/release-v1.3.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4.svg?logo=telegram&logoColor=white)](https://telegram.org/)
@@ -39,8 +39,8 @@ You → Telegram → 🧠 AI → Obsidian Vault → all your devices
 |---|---|---|
 | 📄 | PDF · DOCX · XLSX · TXT · MD · JSON · CSV | Full-text extraction → knowledge note |
 | 🔗 | Any web link | 3-layer scraping chain (headers → cloudscraper → jina.ai), SSRF-safe |
-| 🎬 | YouTube / video links | Free caption transcript → summary note with video info |
-| 📖 | E-books: EPUB · MOBI · AZW·AZW3·AZW4 · DJVU · FB2 · LIT | Title / author / year extracted + file attached |
+| 🎬 | YouTube / video links | 3-tier fallback chain (captions → yt-dlp subtitles → local faster-whisper/Groq audio; up to 1h30+ free) → summary note with video info & thumbnail |
+| 📖 | E-books: EPUB · MOBI · AZW·AZW3·AZW4 · DJVU · FB2 · LIT | Title / author / year extracted + thematic study note with related topic tags |
 | 📧 | Email files (`.eml`) | Parsed → knowledge note |
 | 💭 | **Plain text thoughts** | Queued safely, then `/text` merges them into one structured, categorized note |
 | 🗣️ | Voice notes (`.ogg` / audio files) | Queued, then `/voice` transcribes (free Whisper) into one note · caption `research` = instant deep search |
@@ -65,6 +65,7 @@ Send with a caption or `/command`:
 | `/text` | Turn every queued text message into **one** note |
 | `/voice` | Transcribe every queued audio into **one** note |
 | `/queue` | See what's waiting in the queues |
+| `/disk` | Check vault disk usage & warnings if space < 20% |
 | `/research <topic>` | Deep web research with cited sources |
 | `/models` | List working LLM models, tap to switch instantly |
 | `/organize preview` | Show which sparse category folders would be merged |
@@ -73,16 +74,12 @@ Send with a caption or `/command`:
 
 ### 🛡️ Never lose work
 
-- **Duplicate detection** — the same link, file or text sent twice is caught
-  by a local SQLite fingerprint store (URLs are normalized; tracking params
-  stripped; YouTube links collapse to the video id). Add `--force` to any
-  caption/message to override.
-- **Queues survive restarts** — `/text` and `/voice` items are persisted in
-  SQLite and expire after `PENDING_QUEUE_TTL_HOURS` (default 24h).
-- **10-minute hard cap** — every heavy task is wrapped in a deadline with a
-  "still working" checkpoint; runaway jobs are cancelled and you're told why.
-- **Thumbnails** — link & video notes embed the page's `og:image` (or the
-  YouTube thumbnail) at the top, stored in `90_Attachments/thumbnails/`.
+- **Duplicate detection** — the same link, file or text sent twice is caught by a local SQLite fingerprint store (URLs are normalized; tracking params stripped; YouTube links collapse to the video id). Add `--force` to any caption/message to override.
+- **Queues survive restarts** — `/text` and `/voice` items are persisted in SQLite and expire after `PENDING_QUEUE_TTL_HOURS` (default 24h).
+- **Disk-space health alerts** — proactive warning every 6h + inline alerts on notes when free disk space falls below 20% (`DISK_WARN_THRESHOLD_PCT`).
+- **10-minute hard cap** — every heavy task is wrapped in a deadline with a "still working" checkpoint; runaway jobs are cancelled and you're told why.
+- **Scraper & YouTube resilience** — multi-tier scraper fallback (headers → cloudscraper → jina.ai) and YouTube fallback chain (API → yt-dlp subtitles → local Whisper) handles videos up to 1h30+ for free.
+- **Thumbnails** — link & video notes embed the page's `og:image` (or the YouTube thumbnail) at the top, stored in `90_Attachments/thumbnails/`.
 
 ### 🗂️ Automatic organization
 
@@ -202,6 +199,7 @@ auto-switches to the best free alternative, and notifies you — weekly checks i
 - [x] Scraper fallback chain: browser headers → cloudscraper → jina.ai
 - [x] Chapter-aware book pipeline: TOC/index stripped → map-reduce over sections → background processing with live progress
 - [x] v1.2 — Dedup store (`--force`) · `/text` + `/voice` queues · error handler + 10-min deadlines · thumbnails · `/organize`
+- [x] v1.3 — YouTube 3-layer fallback (up to 1h30+ free with yt-dlp & faster-whisper) · Disk-space monitoring (`/disk` + 6h proactive alerts) · Resilient `/organize` · rclone VFS cache auto-heals
 - [ ] Semantic search over the vault (`/search <query>`)
 - [ ] Photo/screenshot OCR ingestion
 - [ ] Weekly review notes
