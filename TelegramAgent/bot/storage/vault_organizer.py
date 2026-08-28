@@ -38,6 +38,8 @@ def load_taxonomy() -> Dict:
     try:
         with open(_taxonomy_path(), "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        data = _create_default_taxonomy()
     except (OSError, yaml.YAMLError) as e:
         logger.warning(f"Could not read taxonomy: {e} — using defaults")
         data = {}
@@ -48,14 +50,54 @@ def load_taxonomy() -> Dict:
     }
 
 
+def _create_default_taxonomy() -> dict:
+    """Write config/category_taxonomy.yaml with sensible defaults if missing."""
+    default = {
+        "protected": ["Books", "Finance"],
+        "manual": {
+            "Kubernetes": "Programming",
+            "Docker": "Programming",
+            "Machine-Learning": "AI",
+        },
+        "threshold": 3,
+    }
+    try:
+        path = _taxonomy_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            yaml.safe_dump(default, sort_keys=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+        logger.info("Created default category taxonomy at %s", path)
+    except OSError as e:
+        logger.warning(f"Could not write default taxonomy: {e}")
+    return default
+
+
 def scan_categories(vault_root: str) -> Dict[str, int]:
-    """Count .md notes per category folder at the vault root."""
+    """Count .md notes per category folder at the vault root.
+
+    A single unreadable sub-folder (e.g. a slow/intermittent rclone mount
+    or a permissions error) must NOT abort the whole scan — it is logged and
+    skipped so /organize always returns instead of crashing.
+    """
     vault = Path(vault_root)
     counts: Dict[str, int] = {}
-    for child in vault.iterdir():
-        if not child.is_dir() or child.name.startswith(".") or child.name.startswith(_RESERVED_PREFIXES):
+    try:
+        children = list(vault.iterdir())
+    except OSError as e:
+        logger.error(f"Could not list vault root {vault}: {e}")
+        return counts
+    for child in children:
+        if child.name.startswith(".") or child.name.startswith(_RESERVED_PREFIXES):
             continue
-        n = len(list(child.glob("*.md")))
+        try:
+            if not child.is_dir():
+                continue
+            n = len(list(child.glob("*.md")))
+        except OSError as e:
+            logger.warning(f"Skipping unreadable category folder {child}: {e}")
+            continue
         if n:
             counts[child.name] = n
     return counts

@@ -441,7 +441,16 @@ async def organize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Merge sparse category folders. '/organize preview' only shows the plan."""
     preview = bool(context.args) and context.args[0].lower() == "preview"
     status = StatusMessage(await update.message.reply_text("🧹 Analyzing vault categories…"))
-    plan = await asyncio.to_thread(build_merge_plan, VAULT_PATH)
+    try:
+        plan = await asyncio.to_thread(build_merge_plan, VAULT_PATH)
+    except Exception as e:
+        logger.exception("Failed to build organize plan")
+        await status.fail(
+            "Could not read the vault (this often happens when the rclone "
+            "mount / Google Drive is momentarily unavailable).\n"
+            "Check logs/bot.log and try again in a moment."
+        )
+        return
     if not plan:
         await status.update(
             "✅ Vault is tidy — no merge candidates.\n"
