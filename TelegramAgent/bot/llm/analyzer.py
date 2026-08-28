@@ -1,113 +1,305 @@
+"""AI analysis: turns shared content into structured Obsidian knowledge notes.
+
+Uses the multi-provider layer (llm/provider.py) with automatic fallback.
+"""
 from __future__ import annotations
 
-import logging
-import os
 import json
-from typing import Dict, Any, Optional
+import logging
+from typing import Any, Dict, Optional
+
+from llm.provider import AllProvidersFailedError, chat
 
 logger = logging.getLogger(__name__)
 
-# Gemini / Google GenAI SDK expected to be installed.
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
+CATEGORIES = (
+    "travel, car, mechanics, finance, programming, ai, religion, bible, "
+    "politics, iot, database, data_analysis, web_scraping, exercise, diet, "
+    "food, cooking, books, uncategorized"
+)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
-DEFAULT_TEMPERATURE = 0.4
+# --------------------------------------------------------------- prompts ---
+
+DETAIL_SPECS = {
+    "summarize": (
+        "Produce ONLY the Overview and Key Concepts sections. Keep it brief "
+        "(max ~150 words total). This is a quick-reference note."
+    ),
+    "detailed": (
+        "Produce ALL sections of the knowledge template below, fully fleshed "
+        "out. This is the default deep-study format."
+    ),
+    "precise": (
+        "Focus on exact facts: numbers, dates, names, commands, formulas. "
+        "Preserve them verbatim; skip narrative filler."
+    ),
+}
+
+KNOWLEDGE_TEMPLATE = """You are an expert study-notes author building a personal knowledge base in Obsidian.
+
+Write the note in this exact Markdown structure:
+
+## 📌 Overview
+(2-4 sentences: what this is and why it matters)
+
+## 🔑 Key Concepts
+(bulleted list of the main ideas, each explained in 1-2 sentences)
+
+## 📊 Facts & Data
+(all concrete facts: numbers, dates, names, versions, commands, formulas)
+
+## 💡 Insights & Implications
+(what this means, why it matters, connections to broader topics)
+
+## ❓ Open Questions
+(what is unclear or worth researching further)
+
+Rules:
+- Use ## headers exactly as shown above.
+- Skip a section ONLY if there is truly nothing for it.
+- Never invent facts that are not in the source material.
+- IMPORTANT: Your reply MUST START with this exact single line (then a blank \
+line, then the note):
+META_JSON: {"title": "...", "category": "...", "tags": ["...", "..."]}
+"""
+
+PERSONAL_NOTE_EXTRA = """The user is sharing their OWN raw thought or idea written \
+casually. Transform it into a clean structured note WITHOUT changing their \
+meaning or inventing facts. Where their idea connects to known concepts, you \
+may add helpful context clearly marked as "(context: ...)". Short thoughts \
+get short sections — do not pad."""
 
 
-def _safe_api_key() -> str:
-    """Return the API key or raise a clear error before any network call."""
-    key = GEMINI_API_KEY.strip()
-    if not key:
-        raise RuntimeError(
-            "GEMINI_API_KEY is not set. Copy .env.example to .env and fill in your key."
-        )
-    return key
+def build_prompt(kind: str, source_kind: str) -> str:
+    """System prompt for the requested detail kind and source kind."""
+    detail = DETAIL_SPECS.get(kind, DETAIL_SPECS["detailed"])
+    extra = PERSONAL_NOTE_EXTRA if source_kind == "text" else ""
+    return f"{KNOWLEDGE_TEMPLATE}\n{detail}\n{extra}".strip()
 
-# System prompt instructs the model to categorize + return specific JSON.
-SYSTEM_PROMPT = """
-You are an AI assistant that converts documents into structured Obsidian notes.
-Given the text content and a requested detail_level ({detail_level}), produce a JSON object (valid, raw JSON only, no markdown fences) with EXACTLY these fields:
-{{"
-  "title": "A concise title for the note in English",
-  "category": "one of: travel, car, mechanics, finance, programming, ai, religion, bible, politics, iot, database, data_analysis, web_scraping, exercise, diet, food, cooking, uncategorized ',
-  "content": "A well-structured Markdown summary, in US English, adapted to the requested detail level:
-    - summarize: 3-8 bullet points
-    - detailed: full UTF-8 Markdown with subheadings, bullet points, key facts, quotes, links,
-    - precise: all data, numbers, names, URLs, quotes, exact specs preserved
-    - raw: the original document text verbatim
-  ",
-  "tags": ["3-7 lower-case english tag words, separated by commas"],
-  "source_url": "leave empty if none / or provide the source url string"
-}}
-Only output raw JSON. No explanations. No code fences.
+
+METADATA_ONLY_PROMPT = """Read the content and reply ONLY with raw JSON (no fences):
+{{"title": "concise English title", "category": "one of: __CATS__", "tags": ["t1","t2","t3"]}}
+Valid categories: __CATS__"""
+
+RESEARCH_PROMPT = """You are a research analyst creating a study note for an Obsidian \
+knowledge base on the topic: "{topic}"
+
+Below are web sources (title, URL, extracted content). Synthesize them into a \
+comprehensive, well-structured note. Compare sources; note disagreements.
+
+Structure:
+## 📌 Topic Overview
+## 🔑 Key Findings
+(the substance — what is known/claimed, with specifics)
+## 📊 Facts & Data
+(concrete numbers, dates, versions, commands from the sources)
+## 💡 Analysis & Insights
+(interpretation, implications, expert opinions found)
+## ⚠️ Points of Contention
+(where sources disagree or are uncertain)
+## 🔗 Sources
+- [Title](URL) — one line each
+
+Rules: cite which source supports key claims as (Source: title). Never invent \
+facts not present in the sources. If sources are thin, say so honestly.
+
+End with:
+META_JSON: {{"title": "Research: {topic}", "category": "best fit from: {categories}", "tags": ["research", "..."]}}
+"""
+
+BOOK_SECTION_PROMPT = """This is section {section_num} of {total} from the book \
+"{book_title}" by {authors}. Extract ALL substantive knowledge from this \
+section for a study note:
+
+- Key concepts and their explanations
+- Important facts, numbers, examples, commands
+- Actionable advice or methods
+
+Be thorough and specific. Plain Markdown bullets. Do NOT summarize vaguely — \
+preserve concrete details. Do not include table-of-contents or page furniture."""
+
+BOOK_FINAL_PROMPT = """You are given knowledge extractions from all sections of \
+the book "{book_title}" by {authors}, in order. Merge them into ONE \
+comprehensive study note in this structure:
+
+# 📚 {book_title}
+
+## 📌 About the Book
+(2-4 sentences: what the book covers and who it's for)
+
+## 🔑 Core Ideas
+(the book's central thesis and main concepts, well explained)
+
+## 📖 Chapter-by-Chapter Knowledge
+(a subsection per logical part of the book with the real content — \
+this is where the reader learns; be specific and complete)
+
+## 🛠️ Practical Takeaways
+(actionable lessons, methods, commands)
+
+## ❓ To Explore Further
+
+Rules: preserve concrete details from the extractions. This note replaces \
+reading the whole book — completeness matters more than brevity. End with:
+META_JSON: {{"title": "{book_title} — Study Notes", "category": "books", "categories": ["books", "<1-2 topic categories that match the book's subject, e.g. programming, hacking, finance"], "tags": ["book", "...3-6 topic tags"]}}
+"""
+
+VIDEO_PROMPT = """You are given the transcript of a video. Create a study note \
+so the user can learn from it without watching:
+
+## 📌 Video Overview
+(what the video covers, style/audience)
+
+## 🔑 Key Points
+(the substance, in order — explained, not just listed)
+
+## 📊 Facts & Data
+(numbers, tools, commands, names mentioned)
+
+## 💡 Takeaways
+(actionable lessons)
+
+End with:
+META_JSON: {{"title": "🎬 <video title or topic>", "category": "best fit from: {categories}", "tags": ["video", "..."]}}
 """
 
 
-def analyze_content(content: str, detail: str, source_url: str = "") -> Optional[Dict[str, Any]]:
-    """
-    Send content to Gemini and structure output for Obsidian storage.
+# ------------------------------------------------------------ main entry ---
 
-    Returns a note dict (see write_note_to_vault) or None on failure.
+async def analyze_content(
+    content: str,
+    detail: str,
+    source_url: str = "",
+    source_kind: str = "document",
+) -> Optional[Dict[str, Any]]:
     """
-    if not genai:
-        logger.error("The 'google-genai' package is not installed.")
+    Transform shared content into a structured knowledge-note dict.
+    Returns {title, category, content, tags, detail_level} or None on failure.
+
+    Raises AllProvidersFailedError when every provider/model fails, so the
+    bot can trigger the model-selection flow in Telegram.
+    """
+    if not content or not content.strip():
+        logger.warning("analyze_content called with empty content")
         return None
 
-    try:
-        api_key = _safe_api_key()
-    except RuntimeError as e:
-        logger.error(str(e))
+    # 'raw' level: keep text verbatim; ask AI only for cheap metadata.
+    if detail == "raw":
+        meta = await _extract_metadata(content)
+        if meta is None:
+            return None
+        meta["content"] = content
+        meta["detail_level"] = detail
+        return meta
+
+    prompt = build_prompt(detail, source_kind)
+    payload = f"Source URL: {source_url}\n\n---\n\n{content}" if source_url else content
+
+    note_text = await chat(prompt, payload, max_tokens=8192)
+    note_dict = _parse_response(note_text)
+    if note_dict is None:
         return None
 
-    # Create Gemini client
-    client = genai.Client(api_key=api_key)
+    # Auto-repair: some models omit the META_JSON line → recover metadata cheaply
+    if note_dict.get("title") in (None, "", "Untitled") or note_dict.get(
+        "category"
+    ) in (None, "", "uncategorized"):
+        try:
+            meta = await _extract_metadata(content)
+            if meta:
+                if note_dict.get("title", "Untitled") == "Untitled":
+                    note_dict["title"] = meta.get("title", "Untitled")
+                if note_dict.get("category", "uncategorized") == "uncategorized":
+                    note_dict["category"] = meta.get("category", "uncategorized")
+                if not note_dict.get("tags"):
+                    note_dict["tags"] = meta.get("tags", [])
+        except AllProvidersFailedError:
+            raise
+        except Exception as e:
+            logger.warning(f"Metadata recovery skipped: {e}")
 
-    # Prepare the prompt using detail on the fly
-    prompt = SYSTEM_PROMPT.format(detail_level=detail)
+    note_dict.setdefault("content", "")
+    note_dict["detail_level"] = detail
+    return note_dict
 
-    # If there is a URL, include it in the content block
-    if source_url:
-        combined = f"Source URL: {source_url}\n\n---\n\n{content}"
-    else:
-        combined = content
 
-    # Generate the response with Gemini
+async def _extract_metadata(content: str) -> Optional[Dict[str, Any]]:
+    """Cheap metadata-only extraction (title/category/tags)."""
     try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[
-                prompt,
-                combined,
-            ],
+        raw = await chat(
+            METADATA_ONLY_PROMPT.replace("__CATS__", CATEGORIES),
+            content[:6000],
+            max_tokens=200,
         )
-        # Response should be raw JSON
-        raw_response = response.text.strip()
-        # Remove any code fences if present
-        if raw_response.startswith("```"):
-            # Drop the opening fence line and any trailing fence
-            raw_response = raw_response.split("\n", 1)[-1]
-            raw_response = raw_response.rstrip("`").strip()
-
-        note_dict = json.loads(raw_response)
-
-        # Basic validation and cleanup
-        if "title" not in note_dict:
-            note_dict["title"] = "Untitled"
-        if "category" not in note_dict:
-            note_dict["category"] = "uncategorized"
-        if "content" not in note_dict:
-            note_dict["content"] = note_dict.get("summary", "")
-        if "tags" not in note_dict:
-            note_dict["tags"] = []
-
-        note_dict["detail_level"] = detail
-
-        return note_dict
+        return _parse_response(raw)
+    except AllProvidersFailedError:
+        raise
     except Exception as e:
-        logger.error(f"Gemini analysis failed: {e}")
+        logger.error(f"Metadata extraction failed: {e}")
         return None
+
+
+# -------------------------------------------------------------- parsing ----
+
+def _parse_response(note_text: str) -> Optional[Dict[str, Any]]:
+    """
+    Split the LLM reply into Markdown body + META_JSON metadata.
+    Robust to: JSON at start or end, code fences, missing META_JSON
+    (salvages any {...} containing "category" anywhere in the text).
+    """
+    import re as _re
+
+    text = note_text.strip()
+    note_dict: Dict[str, Any] = {}
+    meta_candidates = []
+
+    marker = "META_JSON:"
+    if marker in text:
+        _, meta_part = text.split(marker, 1)
+        meta_candidates.append(meta_part.strip().strip("`"))
+        # Body = everything before the marker line
+        head = text.split(marker, 1)[0]
+        # If marker was at position 0, head is empty → body is after JSON block
+        body_from_head = head.strip()
+    else:
+        body_from_head = None
+
+    # Salvage: any JSON object mentioning category/title anywhere in the text
+    for m in _re.finditer(r"\{[^{}]*\"(?:category|title)\"[^{}]*\}", text):
+        meta_candidates.append(m.group(0))
+
+    for cand in meta_candidates:
+        try:
+            parsed = json.loads(cand.strip().strip("`"))
+            if isinstance(parsed, dict) and parsed.get("title"):
+                note_dict.update(parsed)
+                break
+        except json.JSONDecodeError:
+            continue
+
+    if body_from_head:
+        note_dict["content"] = body_from_head
+    elif "content" not in note_dict:
+        # Marker was at start; drop the JSON block from the body
+        body = _re.sub(
+            r"^\s*META_JSON:\s*\{[^{}]*\}\s*", "", text
+        ).strip()
+        note_dict["content"] = body
+
+    title = note_dict.get("title") or ""
+    if not title or title.lower() == "untitled":
+        # Derive a usable title from the first markdown heading or first line
+        for line in (note_dict.get("content") or "").splitlines():
+            s = line.lstrip("# ").strip()
+            if len(s) >= 6:
+                title = s[:80]
+                break
+        note_dict["title"] = title or "Untitled"
+
+    note_dict.setdefault("category", "uncategorized")
+    note_dict.setdefault("tags", [])
+    if isinstance(note_dict["tags"], str):
+        note_dict["tags"] = [
+            t.strip() for t in note_dict["tags"].split(",") if t.strip()
+        ]
+    return note_dict

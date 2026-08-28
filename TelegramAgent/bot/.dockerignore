@@ -2,6 +2,9 @@
 .env
 .env.*
 
+# Runtime agent state
+config.json
+
 # Local virtualenv & caches
 .venv/
 venv/
@@ -16,6 +19,10 @@ __pycache__/
 # Test artifacts
 sample_test_doc.txt
 tests/
+
+# Runtime state (dedup DB, staging, logs)
+data/
+logs/
 
 # IDE
 .idea/

@@ -232,3 +232,67 @@ def _try_read_raw(file_path: str) -> str:
     except Exception as e:
         logger.debug(f"Raw read failed for {file_path}: {e}")
         return ""
+
+
+# ------------------------------------------------- book pipeline helpers ----
+
+_TOC_LINE = re.compile(r"^\s*.{0,80}[.·…]{3,}\s*\d{1,4}\s*$")   # "Title ..... 12"
+_PAGE_NUM = re.compile(r"^\s*\d{1,5}\s*$")
+_CHAPTER = re.compile(r"^\s*(chapter|part|section)\b[ :.\-\d].{0,70}$", re.I | re.M)
+
+
+def clean_book_text(text: str) -> str:
+    """
+    Strip junk that pollutes study notes: table-of-contents lines
+    ("Chapter 3 .... 45"), bare page numbers, and collapsed whitespace.
+    """
+    if not text:
+        return ""
+    kept = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            kept.append("")
+            continue
+        if _TOC_LINE.match(s) or _PAGE_NUM.match(s):
+            continue
+        kept.append(line)
+    cleaned = "\n".join(kept)
+    # Collapse 3+ blank lines to one
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def split_into_chunks(text: str, max_chars: int = 24000) -> List[str]:
+    """
+    Split book text into chunks near `max_chars`, preferring paragraph and
+    chapter boundaries. Chapter starts are recorded so the map step can be
+    section-aware.
+    """
+    if len(text) <= max_chars:
+        return [text] if text else []
+
+    chunks: List[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + max_chars, n)
+        if end < n:
+            # Prefer a hard chapter boundary inside the window
+            best = -1
+            for m in _CHAPTER.finditer(text, start + max_chars // 2, end):
+                best = m.start()
+            if best == -1:
+                # Fall back to the last double-newline (paragraph break)
+                best = text.rfind("\n\n", start + max_chars // 2, end)
+            if best > start:
+                end = best
+        chunks.append(text[start:end].strip())
+        start = end
+
+    return [c for c in chunks if c]
+
+
+def count_chapters(text: str) -> int:
+    """Approximate number of chapter headings — useful for progress display."""
+    return len(_CHAPTER.findall(text)) or 1
