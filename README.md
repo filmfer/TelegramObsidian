@@ -1,11 +1,8 @@
 <div align="center">
 
-# 🧠 BrainHarvest
+<img width="1100" height="614" alt="image" src="https://github.com/user-attachments/assets/245adcc2-d7bd-43f2-a638-9cd945880deb" />
 
-### Turn your Telegram into an AI-powered knowledge machine
-
-Send documents, links, e-books, voice notes & thoughts —<br/>
-get structured, searchable **Obsidian knowledge notes** powered by AI.
+> **Turn Telegram into your personal knowledge capture pipeline.** Send documents, links, and e-books to a bot — get clean, AI-categorized Markdown notes in your Obsidian vault, synced across all your devices.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/release-v1.0.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
@@ -219,7 +216,14 @@ non-root container · secrets only via env vars. See the [security table](Telegr
 
 ---
 
-## ❓ FAQ
+## 👤 Author
+
+**Filipe Fernandes**
+📧 filmfer@gmail.com
+
+---
+
+## 📄 License
 
 <details>
 <summary><b>Does Telegram need to reach my server?</b></summary>
