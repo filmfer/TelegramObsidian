@@ -101,7 +101,7 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStart=/usr/bin/rclone mount $REMOTE_NAME: $MOUNT_POINT --vfs-cache-mode writes
+ExecStart=/usr/bin/rclone mount $REMOTE_NAME: $MOUNT_POINT --vfs-cache-mode writes --buffer-size 64M --vfs-read-ahead 128M --dir-cache-time 1m
 ExecStop=/bin/fusermount -u $MOUNT_POINT
 Restart=on-failure
 RestartSec=10

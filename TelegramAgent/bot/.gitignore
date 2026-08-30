@@ -4,3 +4,15 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Runtime agent state (chosen LLM model, cached catalogs)
+config.json
+
+# Dedup + pending-queue SQLite database
+data/
+
+# Rotating application logs
+logs/
+
+# Personal update guide (never committed — server-specific notes)
+UPDATE.md

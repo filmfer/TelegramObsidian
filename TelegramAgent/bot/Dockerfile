@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 # Install tini for clean shutdown + Tesseract (OCR images later)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends tesseract-ocr libmagic1 && \
+    apt-get install -y --no-install-recommends tesseract-ocr libmagic1 ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -12,7 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Non-root user for security
-RUN useradd -m appuser && chown -R appuser /app
+RUN useradd -m appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app
 USER appuser
 
 ENV PYTHONUNBUFFERED=1

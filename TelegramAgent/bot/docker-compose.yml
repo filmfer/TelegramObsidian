@@ -9,5 +9,10 @@ services:
       # (rclone mount or a synced Google Drive directory).
       # Default: uses the OBSIDIAN_VAULT_HOST_PATH env var from .env
       - ${OBSIDIAN_VAULT_HOST_PATH:-/srv/obsidian-vault}:/data/vault
+      # Persist the dedup/pending-queue SQLite DB across rebuilds
+      - agent-data:/app/data
     # No host ports exposed — the bot uses Telegram polling (outbound HTTPS only).
     # This minimizes the attack surface on the VPS.
+
+volumes:
+  agent-data:
