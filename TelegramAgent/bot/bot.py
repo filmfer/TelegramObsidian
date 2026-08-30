@@ -23,9 +23,12 @@ from telegram.ext import (
 from parsers.document_parser import parse_document
 from parsers.link_parser import parse_link, parse_link_with_meta, download_thumbnail
 from parsers.book_parser import (
+    book_to_markdown,
     clean_book_text,
     extract_book_metadata,
+    extract_chapters,
     is_book_file,
+    safe_book_filename,
     split_into_chunks,
 )
 from parsers.audio_parser import (
@@ -44,8 +47,8 @@ from parsers.video_parser import (
     is_youtube_url,
 )
 from llm.analyzer import (
-    BOOK_FINAL_PROMPT,
-    BOOK_SECTION_PROMPT,
+    BOOK_SYNTHESIS_PROMPT,
+    CHAPTER_PROMPT,
     RESEARCH_PROMPT,
     VIDEO_PROMPT,
     CATEGORIES,
@@ -120,6 +123,9 @@ THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
 init_db()  # dedup + pending-queue SQLite store (data/agent.db)
 
 DETAIL_LEVELS = {"summarize", "detailed", "precise", "raw", "book"}
+# Book pipeline tuning
+BOOK_MAX_CHAPTERS = int(os.getenv("BOOK_MAX_CHAPTERS", "60"))
+BOOK_FULLTEXT = os.getenv("BOOK_FULLTEXT", "true").strip().lower() in ("1", "true", "yes")
 USER_COOLDOWN_SECONDS = 10
 _user_last_request: dict = {}
 
@@ -301,6 +307,7 @@ async def _document_job(update, file_obj, caption, detail_level, status):
                     "❌ Could not extract book metadata. The file is still saved as an attachment."
                 )
                 return
+            book_meta["path"] = local_path  # needed for chapter extraction
             await _save_book_note(
                 update,
                 context,
@@ -889,10 +896,10 @@ async def _save_book_note(update, context, book_meta, detail_level="book", sourc
 async def _process_book_task(update, book_meta, detail_level, source, attachment, status,
                              fingerprint: str = "", force: bool = False):
     """
-    Map-reduce study-note pipeline:
-      clean → split into section-sized chunks → extract knowledge per chunk
-      (map) → merge into one comprehensive study note (reduce).
-    Uses free-tier models; progress is edited into the status message.
+    Chapter-aware study-note pipeline:
+      extract real chapters → detailed per-chapter summary (map, one LLM call
+      per chapter) → cheap synthesis from digests → assemble note locally
+      (no giant merge call, no truncation) → save full-text Markdown to vault.
     """
     title = book_meta.get("title") or "Untitled Book"
     authors = ", ".join(book_meta.get("authors", [])) or "Unknown"
@@ -907,35 +914,86 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
             )
             return
 
-        chunks = split_into_chunks(raw)[:40]  # safety cap for very large books
-        total = len(chunks)
-        logger.info(f"Book '{title}': {len(raw)} chars → {total} sections")
+        local_path = book_meta.get("path") or ""
+        chapters = (
+            extract_chapters(local_path, max_chapters=BOOK_MAX_CHAPTERS)
+            if local_path
+            else []
+        )
+        if not chapters:
+            # Fallback: no detectable chapter structure → part-sized chunks
+            chapters = [
+                {"title": f"Part {i}", "text": c}
+                for i, c in enumerate(split_into_chunks(raw), 1)
+            ]
+        total = len(chapters)
+        logger.info(f"Book '{title}': {len(raw)} chars → {total} chapters/parts")
 
-        extractions = []
-        for i, chunk in enumerate(chunks, 1):
-            prompt = BOOK_SECTION_PROMPT.format(
-                section_num=i, total=total, book_title=title, authors=authors
+        chapter_notes = []
+        for i, ch in enumerate(chapters, 1):
+            ch_title = ch.get("title") or f"Part {i}"
+            prompt = CHAPTER_PROMPT.format(
+                chapter_num=i, total=total, chapter_title=ch_title,
+                book_title=title, authors=authors,
             )
-            section_text, _ = await chat(prompt, chunk, max_tokens=2500)
-            extractions.append(f"## Section {i}\n{section_text}")
+            section_text, _ = await chat(prompt, ch["text"][:24000], max_tokens=2500)
+            chapter_notes.append({"title": ch_title, "summary": section_text})
             if i % 2 == 0 or i == total:
                 try:
                     await status.edit_text(
-                        f"📖 Processing “{title}”\n🧠 Extracting knowledge — section {i}/{total}…"
+                        f"📖 Processing “{title}”\n"
+                        f"🧠 Summarizing chapter {i}/{total} — {ch_title[:40]}…"
                     )
                 except Exception:
                     pass  # message may be identical; ignore edit errors
             await asyncio.sleep(0.5)  # be polite to free-tier rate limits
 
-        await status.edit_text(f"📚 Merging {total} sections into your study note…")
-        final_prompt = BOOK_FINAL_PROMPT.format(book_title=title, authors=authors)
-        merged = "\n\n".join(extractions)
-        final_note, _ = await chat(final_prompt, merged[-100000:], max_tokens=8000)
+        # Full-text Markdown copy of the book inside the vault (90_Attachments/BookTexts)
+        fulltext_name = ""
+        if BOOK_FULLTEXT and local_path:
+            try:
+                fulltext_name = safe_book_filename(title) + ".md"
+                fulltext_dir = ATTACHMENTS_DIR / "BookTexts"
+                fulltext_dir.mkdir(parents=True, exist_ok=True)
+                (fulltext_dir / fulltext_name).write_text(
+                    book_to_markdown(book_meta, chapters), encoding="utf-8"
+                )
+                logger.info(f"Full-text markdown saved: {fulltext_dir / fulltext_name}")
+            except Exception as e:
+                logger.error(f"Failed to write full-text markdown: {e}")
+                fulltext_name = ""
 
-        note_dict = _parse_response(final_note)
+        await status.edit_text(f"📚 Synthesizing {total} chapter summaries…")
+        digest = "\n".join(
+            f"Chapter {i} — {n['title']}: {n['summary'][:300].replace(chr(10), ' ')}"
+            for i, n in enumerate(chapter_notes, 1)
+        )
+        synth_prompt = BOOK_SYNTHESIS_PROMPT.format(book_title=title, authors=authors)
+        synth_text, _ = await chat(synth_prompt, digest, max_tokens=2000)
+
+        note_dict = _parse_response(synth_text)
         if not note_dict or not note_dict.get("content"):
-            await status.edit_text("❌ Book synthesis failed — please try again.")
-            return
+            note_dict = {
+                "title": f"{title} — Study Notes",
+                "category": "books",
+                "content": synth_text,
+            }
+
+        # Assemble the final note locally: synthesis + one section per chapter
+        body = note_dict["content"].rstrip()
+        body += "\n\n## 📖 Chapter-by-Chapter\n"
+        for i, n in enumerate(chapter_notes, 1):
+            summary = n["summary"]
+            if "KEYWORD:" in summary:  # strip the keyword footer line
+                summary = summary.split("KEYWORD:", 1)[0]
+            body += f"\n### {i}. {n['title']}\n\n{summary.strip()}\n"
+        if fulltext_name:
+            link = fulltext_name.removesuffix(".md")
+            body += (
+                f"\n## 📚 Full Text\n"
+                f"The complete book converted to Markdown: [[{link}]]\n"
+            )
+        note_dict["content"] = body
 
         note_dict.update(
             {

@@ -107,42 +107,38 @@ End with:
 META_JSON: {{"title": "Research: {topic}", "category": "best fit from: {categories}", "tags": ["research", "..."]}}
 """
 
-BOOK_SECTION_PROMPT = """This is section {section_num} of {total} from the book \
-"{book_title}" by {authors}. Extract ALL substantive knowledge from this \
-section for a study note:
+CHAPTER_PROMPT = """This is chapter {chapter_num} of {total} — "{chapter_title}" — from the \
+book "{book_title}" by {authors}.
 
-- Key concepts and their explanations
-- Important facts, numbers, examples, commands
-- Actionable advice or methods
+Write a DETAILED study summary of this chapter (up to ~1200 words) in Markdown:
 
-Be thorough and specific. Plain Markdown bullets. Do NOT summarize vaguely — \
-preserve concrete details. Do not include table-of-contents or page furniture."""
+**Overview** — 3-5 sentences on what the chapter covers.
+**Key Concepts** — each important concept with a clear, self-contained explanation.
+**Important Details** — facts, numbers, examples, names, commands worth remembering.
+**Actionable Lessons** — methods or advice the reader can apply (if any).
 
-BOOK_FINAL_PROMPT = """You are given knowledge extractions from all sections of \
-the book "{book_title}" by {authors}, in order. Merge them into ONE \
-comprehensive study note in this structure:
+Rules: preserve concrete details; this summary should replace reading the chapter. \
+Never invent content that is not in the text. Do not include page furniture, \
+headers/footers or table of contents.
 
-# 📚 {book_title}
+End with exactly one line:
+KEYWORD: <3-6 comma-separated topic keywords for this chapter>"""
 
-## 📌 About the Book
-(2-4 sentences: what the book covers and who it's for)
+BOOK_SYNTHESIS_PROMPT = """You are given one short digest per chapter of the book \
+"{book_title}" by {authors}, in order. Write ONLY the opening sections of a \
+comprehensive study note (per-chapter sections are added separately):
 
-## 🔑 Core Ideas
-(the book's central thesis and main concepts, well explained)
+## 🎯 Synopsis
+(4-8 sentences: what the book covers, its central thesis, who it is for)
 
-## 📖 Chapter-by-Chapter Knowledge
-(a subsection per logical part of the book with the real content — \
-this is where the reader learns; be specific and complete)
+## 💡 Core Ideas
+(the 5-10 most important concepts of the whole book, each well explained)
 
 ## 🛠️ Practical Takeaways
-(actionable lessons, methods, commands)
+(actionable lessons and methods distilled across the book)
 
-## ❓ To Explore Further
-
-Rules: preserve concrete details from the extractions. This note replaces \
-reading the whole book — completeness matters more than brevity. End with:
-META_JSON: {{"title": "{book_title} — Study Notes", "category": "books", "categories": ["books", "<1-2 topic categories that match the book's subject, e.g. programming, hacking, finance"], "tags": ["book", "...3-6 topic tags"]}}
-"""
+Do NOT write per-chapter sections. End with:
+META_JSON: {{"title": "{book_title} — Study Notes", "category": "books", "categories": ["books", "<1-2 topic categories matching the book's subject, e.g. programming, hacking, finance"], "tags": ["book", "...3-6 topic tags"]}}"""
 
 VIDEO_PROMPT = """You are given the transcript of a video. Create a study note \
 so the user can learn from it without watching:

@@ -37,9 +37,11 @@ except TranscriptionError as e:
 except FileNotFoundError:
     print("✅ audio_parser error path OK (file missing)")
 
-from llm.analyzer import BOOK_SECTION_PROMPT, BOOK_FINAL_PROMPT, RESEARCH_PROMPT
-p = BOOK_SECTION_PROMPT.format(section_num=1, total=10, book_title="T", authors="A")
-assert '"T"' in p and "section 1 of 10" in p
+from llm.analyzer import BOOK_SYNTHESIS_PROMPT, CHAPTER_PROMPT, RESEARCH_PROMPT
+p = CHAPTER_PROMPT.format(chapter_num=1, total=10, chapter_title="Intro", book_title="T", authors="A")
+assert '"T"' in p and 'chapter 1 of 10' in p.lower() and '"Intro"' in p
+p3 = BOOK_SYNTHESIS_PROMPT.format(book_title="T", authors="A")
+assert "Synopsis" in p3 and "META_JSON" in p3
 p2 = RESEARCH_PROMPT.format(topic="linux", categories="programming")
 assert 'Research: linux' in p2
 print("✅ Phase B prompts format OK")

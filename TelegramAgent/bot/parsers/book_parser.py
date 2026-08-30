@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -296,3 +296,190 @@ def split_into_chunks(text: str, max_chars: int = 24000) -> List[str]:
 def count_chapters(text: str) -> int:
     """Approximate number of chapter headings — useful for progress display."""
     return len(_CHAPTER.findall(text)) or 1
+
+# ------------------------------------------------ chapter extraction ----
+
+_CHAPTER_HEADING = re.compile(
+    r"^\s*(chapter|cap[íi]tulo|part|parte|section|se[çc][ãa]o)\s+"
+    r"[\dIVXLCDM]+\b[ :.\-–—]?.{0,70}$",
+    re.I,
+)
+
+
+def extract_chapters(file_path: str, max_chapters: int = 60) -> List[Dict[str, str]]:
+    """
+    Return a list of {"title", "text"} chapters for the e-book.
+    Returns [] when no chapter structure can be detected — the caller then
+    falls back to splitting the raw text into part-sized chunks.
+    """
+    ext = Path(file_path).suffix.lower()
+    chapters: List[Dict[str, str]] = []
+    try:
+        if ext == ".epub":
+            chapters = _epub_chapters(file_path)
+        elif ext == ".fb2":
+            chapters = _fb2_chapters(file_path)
+        elif ext == ".pdf":
+            chapters = _pdf_chapters(file_path)
+    except Exception as e:
+        logger.error(f"Chapter extraction failed for {file_path}: {e}")
+        chapters = []
+
+    chapters = [c for c in chapters if c.get("text", "").strip()]
+    if len(chapters) > max_chapters:
+        # Merge overflow chapters into one combined section, preserving order
+        merged: List[Dict[str, str]] = chapters[: max_chapters - 1]
+        tail = chapters[max_chapters - 1:]
+        merged.append({
+            "title": f"Chapters {max_chapters}-{len(chapters)} (combined)",
+            "text": "\n\n".join(f"### {c['title']}\n\n{c['text']}" for c in tail),
+        })
+        chapters = merged
+    return chapters
+
+
+def _epub_chapters(file_path: str) -> List[Dict[str, str]]:
+    """EPUB: one chapter per spine document; titles from the TOC when possible."""
+    from ebooklib import epub, ITEM_DOCUMENT
+
+    book = epub.read_epub(file_path)
+
+    href_title: Dict[str, str] = {}
+
+    def _walk_toc(items: Any) -> None:
+        for it in items:
+            if isinstance(it, tuple):
+                sec, children = it
+                href = getattr(sec, "href", "") or ""
+                if href:
+                    href_title.setdefault(
+                        Path(href.split("#")[0]).name,
+                        _clean(getattr(sec, "title", "")),
+                    )
+                _walk_toc(children)
+            else:
+                href = getattr(it, "href", "") or ""
+                if href:
+                    href_title.setdefault(
+                        Path(href.split("#")[0]).name,
+                        _clean(getattr(it, "title", "")),
+                    )
+
+    try:
+        _walk_toc(book.toc)
+    except Exception as e:
+        logger.debug(f"EPUB TOC walk failed: {e}")
+
+    chapters: List[Dict[str, str]] = []
+    for item in book.get_items_of_type(ITEM_DOCUMENT):
+        try:
+            content = item.get_content().decode("utf-8", errors="ignore")
+        except Exception as e:
+            logger.debug(f"Skipping EPUB item: {e}")
+            continue
+        plain = _strip_html(content)
+        if len(plain.strip()) < 200:  # covers, nav pages, colophons
+            continue
+        name = Path(item.get_name() or "").name
+        title = href_title.get(name) or ""
+        if not title:
+            stem = Path(name).stem.replace("-", " ").replace("_", " ").strip()
+            title = stem.title() if stem else f"Section {len(chapters) + 1}"
+        chapters.append({"title": title, "text": plain.strip()})
+    return chapters
+
+
+def _fb2_chapters(file_path: str) -> List[Dict[str, str]]:
+    """FB2: one chapter per top-level <section> of each <body>."""
+    from defusedxml import ElementTree as ET
+
+    tree = ET.parse(file_path)
+    root = tree.getroot()
+    ns = {"fb": "http://www.gribuser.ru/xml/fictionbook/2.0"}
+    chapters: List[Dict[str, str]] = []
+    for body in root.findall(".//fb:body", ns):
+        for sec in body.findall("./fb:section", ns):
+            title_el = sec.find("./fb:title", ns)
+            title = ""
+            if title_el is not None:
+                title = " ".join(
+                    t.strip() for t in title_el.itertext() if t and t.strip()
+                )
+            parts = [
+                p.text.strip()
+                for p in sec.iter()
+                if p.tag.endswith("p") and p.text
+            ]
+            text = "\n".join(parts).strip()
+            if text:
+                chapters.append(
+                    {"title": title or f"Section {len(chapters) + 1}", "text": text}
+                )
+    return chapters
+
+
+def _pdf_chapters(file_path: str) -> List[Dict[str, str]]:
+    """
+    PDF: split by detected chapter-heading pages; when fewer than two
+    headings exist, fall back to ~30-page blocks.
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(file_path)
+    pages = [(p.extract_text() or "").strip() for p in reader.pages]
+    if not any(pages):
+        return []
+
+    marks: List[tuple] = []
+    for i, text in enumerate(pages):
+        for line in text.splitlines()[:4]:
+            s = line.strip()
+            if s and _CHAPTER_HEADING.match(s) and len(s) < 80:
+                marks.append((i, s))
+                break
+
+    chapters: List[Dict[str, str]] = []
+    if len(marks) >= 2:
+        bounds = [m[0] for m in marks] + [len(pages)]
+        for j, (start_idx, heading) in enumerate(marks):
+            body = "\n".join(pages[start_idx:bounds[j + 1]]).strip()
+            if len(body) > 300:
+                chapters.append({"title": heading, "text": body})
+        front = "\n".join(pages[: marks[0][0]]).strip()
+        if len(front) > 500:
+            chapters.insert(0, {"title": "Front Matter", "text": front})
+    else:
+        block = 30
+        for j in range(0, len(pages), block):
+            body = "\n".join(pages[j: j + block]).strip()
+            if body:
+                upper = min(j + block, len(pages))
+                chapters.append(
+                    {"title": f"Pages {j + 1}–{upper}", "text": body}
+                )
+    return chapters
+
+
+def book_to_markdown(meta: Dict[str, Any], chapters: List[Dict[str, str]]) -> str:
+    """Serialize the full book as a Markdown document for the Obsidian vault."""
+    lines = [f"# {meta.get('title') or 'Untitled Book'}", ""]
+    header: List[str] = []
+    authors = ", ".join(a for a in meta.get("authors", []) if a)
+    if authors:
+        header.append(f"**Authors:** {authors}")
+    if meta.get("year"):
+        header.append(f"**Year:** {meta['year']}")
+    if header:
+        lines.extend(["  |  ".join(header), ""])
+    lines.extend(["---", ""])
+    for i, ch in enumerate(chapters, 1):
+        title = ch.get("title") or f"Chapter {i}"
+        lines.extend([f"## {i}. {title}", "", ch.get("text", "").strip(), "", "---", ""])
+    return "\n".join(lines).strip() + "\n"
+
+
+def safe_book_filename(title: str) -> str:
+    """Filesystem-safe vault filename derived from a book title."""
+    safe = re.sub(r"[^\w\s-]", "", title or "book").strip()
+    safe = re.sub(r"\s+", " ", safe)[:80].strip() or "book"
+    return safe

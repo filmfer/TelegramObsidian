@@ -40,7 +40,7 @@ You → Telegram → 🧠 AI → Obsidian Vault → all your devices
 | 📄 | PDF · DOCX · XLSX · TXT · MD · JSON · CSV | Full-text extraction → knowledge note |
 | 🔗 | Any web link | 3-layer scraping chain (headers → cloudscraper → jina.ai), SSRF-safe |
 | 🎬 | YouTube / video links | 3-tier fallback chain (captions → yt-dlp subtitles → local faster-whisper/Groq audio; up to 1h30+ free) → summary note with video info & thumbnail |
-| 📖 | E-books: EPUB · MOBI · AZW·AZW3·AZW4 · DJVU · FB2 · LIT | Title / author / year extracted + thematic study note with related topic tags |
+| 📖 | E-books: EPUB · MOBI · AZW·AZW3·AZW4 · DJVU · FB2 · LIT | Title / author / year + multi-page study note with **chapter-by-chapter summaries** and the complete book converted to Markdown, linked from the note |
 | 📧 | Email files (`.eml`) | Parsed → knowledge note |
 | 💭 | **Plain text thoughts** | Queued safely, then `/text` merges them into one structured, categorized note |
 | 🗣️ | Voice notes (`.ogg` / audio files) | Queued, then `/voice` transcribes (free Whisper) into one note · caption `research` = instant deep search |
@@ -56,7 +56,7 @@ Send with a caption or `/command`:
 | `/detailed` ⭐ | **Full study note**: Overview · Key Concepts · Facts & Data · Insights · Open Questions |
 | `/precise` | Exact data extraction — every number preserved |
 | `/raw` | Verbatim text, metadata only |
-| `/book` | Book mode: title, author(s), year + file attached |
+| `/book` | Book mode: title, author(s), year + chapter summaries + full-text Markdown (background) |
 
 ### ⌨️ Commands
 
@@ -197,7 +197,7 @@ auto-switches to the best free alternative, and notifies you — weekly checks i
 - [x] `/research <topic>` — DuckDuckGo + scrape top sources + cited synthesis
 - [x] YouTube/video links → transcript summaries; uploaded videos (≤20MB) → ffmpeg + Whisper
 - [x] Scraper fallback chain: browser headers → cloudscraper → jina.ai
-- [x] Chapter-aware book pipeline: TOC/index stripped → map-reduce over sections → background processing with live progress
+- [x] v1.5 — Book notes rebuilt: real chapter detection (EPUB/FB2 TOC, PDF headings) → detailed per-chapter summaries → note assembled locally (no truncation) + complete book saved as Markdown in `90_Attachments/BookTexts/`
 - [x] v1.2 — Dedup store (`--force`) · `/text` + `/voice` queues · error handler + 10-min deadlines · thumbnails · `/organize`
 - [x] v1.3 — YouTube 3-layer fallback (up to 1h30+ free with yt-dlp & faster-whisper) · Disk-space monitoring (`/disk` + 6h proactive alerts) · Resilient `/organize` · rclone VFS cache auto-heals
 - [ ] Semantic search over the vault (`/search <query>`)

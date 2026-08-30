@@ -44,7 +44,7 @@ data/agent.db              SQLite state (dedup + queues) — outside the vault o
 | 🔗 Links (`https://…`) | 3-layer scraping chain, SSRF-safe, `og:image` thumbnail |
 | 🎬 YouTube / video links | Caption transcript → summary note with video info + thumbnail |
 | 🎥 Uploaded videos (≤20MB) | ffmpeg extracts audio → Whisper → summary note |
-| 📖 E-books: `EPUB · MOBI · AZW/AZW3/AZW4 · DJVU · FB2 · LIT · PDF` | TOC/index stripped → map-reduce over sections → deep study note (background, live progress) |
+| 📖 E-books: `EPUB · MOBI · AZW/AZW3/AZW4 · DJVU · FB2 · LIT · PDF` | Real chapters detected (EPUB/FB2 TOC, PDF headings) → detailed per-chapter summaries → multi-page study note + the complete book saved as Markdown (background, live progress) |
 | 📧 Email files (`.eml`) | Parsed → knowledge note |
 | 💭 Plain text | Queued → `/text` merges into one structured note |
 | 🗣️ Voice notes / audio | Queued → `/voice` transcribes (free Whisper) into one note; caption `research` = instant deep search |
@@ -58,7 +58,27 @@ data/agent.db              SQLite state (dedup + queues) — outside the vault o
 | `/detailed` ⭐ | Full study note: Overview · Key Concepts · Facts & Data · Insights · Open Questions |
 | `/precise` | Exact data extraction — every number preserved |
 | `/raw` | Verbatim text, metadata only |
-| `/book` | Deep book mode (map-reduce, background) |
+| `/book` | Deep book mode: chapter-by-chapter summaries + full-text Markdown (background) |
+
+### Book notes (v1.5)
+
+A `/book` note is assembled locally from per-chapter LLM summaries — no giant merge call,
+so nothing is truncated even for very long books:
+
+```
+# 📚 <Book Title> — Study Notes
+## 🎯 Synopsis            ← synthesis from chapter digests
+## 💡 Core Ideas
+## 🛠️ Practical Takeaways
+## 📖 Chapter-by-Chapter  ← one detailed section per real chapter
+### 1. Chapter Title …    ← up to ~1200 words each
+## 📚 Full Text           ← wikilink to the complete book in Markdown
+```
+
+The full book is also converted to Markdown at `90_Attachments/BookTexts/<Title>.md`
+(EPUB/FB2 via TOC structure; PDF via heading detection with 30-page fallback) and linked
+from the note with `[[…]]` for Obsidian graph integration. Tune with `BOOK_MAX_CHAPTERS`
+and `BOOK_FULLTEXT` in `.env`.
 
 ### Commands
 
