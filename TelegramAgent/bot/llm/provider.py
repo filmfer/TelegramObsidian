@@ -54,6 +54,13 @@ class AllProvidersFailedError(Exception):
         self.attempts = attempts or []
 
 
+class ProviderRateLimitError(Exception):
+    """Raised when the primary provider and fallbacks are failing due to Rate Limits / Quotas."""
+    def __init__(self, message: str, provider: str = "Unknown"):
+        super().__init__(message)
+        self.provider = provider
+
+
 # ---------------------------------------------------------------- config ---
 
 def _load_config() -> Dict[str, Any]:
@@ -257,14 +264,14 @@ async def chat(system_prompt: str, user_content: str, max_tokens: int = 8192) ->
 
     for model in chain:
         try:
-            resp = await litellm_acompletion(
+            resp, usage_dict = await litellm_acompletion(
                 model=model,
                 system=system_prompt,
                 user=user_content,
                 max_tokens=max_tokens,
             )
             if resp:
-                return resp
+                return resp, {"model": model, "usage": usage_dict}
             attempts.append({"model": model, "error": "empty response"})
         except Exception as e:
             err = str(e).lower()
@@ -272,14 +279,37 @@ async def chat(system_prompt: str, user_content: str, max_tokens: int = 8192) ->
             if any(p in err for p in MODEL_ERROR_PATTERNS):
                 logger.warning(f"Model '{model}' appears unavailable: {e}")
                 continue  # dead model — straight to next in chain
+            
+            # Identify Quota / Rate limit
+            if "429" in err or "quota" in err or "rate limit" in err or "too many requests" in err:
+                logger.warning(f"Rate limit or Quota exceeded on '{model}': {e}")
+                import litellm
+                if isinstance(e, litellm.exceptions.RateLimitError):
+                    # We might be able to get reset time but it's hard without the raw headers.
+                    pass
+                # Keep trying fallbacks, but record that this was a rate limit.
+                
             logger.error(f"Completion failed on '{model}': {e}")
 
+    # If all failed, check if most were rate limits
+    rate_limits = [a for a in attempts if "429" in a.get("error", "").lower() or "quota" in a.get("error", "").lower() or "rate limit" in a.get("error", "").lower()]
+    if len(rate_limits) > 0 and len(rate_limits) == len(chain):
+        raise ProviderRateLimitError(
+            f"Quota exceeded or Rate Limit hit on all providers. Details: {rate_limits[0].get('error')}", 
+            provider=current.split("/")[0] if "/" in current else current
+        )
+    if len(rate_limits) > 0:
+         raise ProviderRateLimitError(
+            f"Quota exceeded or Rate Limit hit. Details: {rate_limits[0].get('error')}", 
+            provider=current.split("/")[0] if "/" in current else current
+        )
+        
     raise AllProvidersFailedError("All LLM providers failed.", attempts)
 
 
 async def litellm_acompletion(
     model: str, system: str, user: str, max_tokens: int
-) -> Optional[str]:
+):
     """Single litellm async completion. Imported lazily to speed startup."""
     import litellm
 
@@ -294,7 +324,16 @@ async def litellm_acompletion(
         num_retries=0,
         timeout=120,
     )
-    return (response.choices[0].message.content or "").strip()
+    content = (response.choices[0].message.content or "").strip()
+    usage = getattr(response, "usage", None)
+    usage_dict = None
+    if usage:
+        usage_dict = {
+            "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+            "completion_tokens": getattr(usage, "completion_tokens", 0),
+            "total_tokens": getattr(usage, "total_tokens", 0)
+        }
+    return content, usage_dict
 
 def _set_catalog(catalog: Dict[str, List[str]]) -> None:
     cfg = _load_config()

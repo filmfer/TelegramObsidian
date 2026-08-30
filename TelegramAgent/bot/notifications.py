@@ -104,6 +104,9 @@ async def on_error(update: object, context) -> None:
     """Global PTB error handler — log everything, answer the user politely."""
     logger.error("Unhandled exception", exc_info=context.error)
 
+    if getattr(context.error, "handled", False):
+        return
+
     message = None
     if isinstance(update, Update):
         message = update.effective_message

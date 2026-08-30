@@ -54,6 +54,7 @@ from llm.analyzer import (
 from llm.provider import chat
 from llm.provider import (
     AllProvidersFailedError,
+    ProviderRateLimitError,
     _free_score,
     get_catalog,
     get_current_model,
@@ -377,8 +378,14 @@ async def text_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = StatusMessage(
         await update.message.reply_text(f"📝 Creating your note from {len(items)} messages…")
     )
-    await run_with_deadline(status, _text_note_job(update, context, combined[:12000], detail, status))
-    await asyncio.to_thread(pending_clear, chat_id, "text")
+    try:
+        success = await run_with_deadline(status, _text_note_job(update, context, combined[:12000], detail, status))
+        if success is not TIMEOUT and success:
+            await asyncio.to_thread(pending_clear, chat_id, "text")
+    except Exception as e:
+        logger.error(f"Text note command failed: {e}")
+        # Note: we do not clear the queue so the user can retry later.
+        pass
 
 
 async def voice_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -395,8 +402,13 @@ async def voice_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     status = StatusMessage(
         await update.message.reply_text(f"🎙️ Transcribing {len(items)} audio(s)…")
     )
-    await run_with_deadline(status, _voice_queue_job(update, context, items, status))
-
+    try:
+        success = await run_with_deadline(status, _voice_queue_job(update, context, items, status))
+        if success is not TIMEOUT and success:
+            await asyncio.to_thread(pending_clear, chat_id, "voice")
+    except Exception as e:
+        logger.error(f"Voice note command failed: {e}")
+        pass
 
 async def _voice_queue_job(update, context, items, status):
     """Transcribe queued audio files sequentially, then build a merged note."""
@@ -416,7 +428,7 @@ async def _voice_queue_job(update, context, items, status):
     combined = "\n\n---\n\n".join(transcripts)[:12000]
     detail = context.user_data.get("detail_level", "detailed")
     await status.update("✍️ Creating your note…")
-    await analyze_and_save(
+    result = await analyze_and_save(
         update, context, combined, detail,
         source="telegram-voice::queued batch",
         source_type="voice",
@@ -424,17 +436,19 @@ async def _voice_queue_job(update, context, items, status):
         fingerprint=compute_text_fingerprint(combined),
     )
 
-    # Cleanup: clear the queue + remove staging files
-    await asyncio.to_thread(pending_clear, update.effective_chat.id, "voice")
-    for item in items:
-        try:
-            Path(item["content"]).unlink(missing_ok=True)
-        except OSError as e:
-            logger.warning("Could not delete staging file: %s", e)
+    # Cleanup staging files ONLY if success
+    if result:
+        for item in items:
+            try:
+                Path(item["content"]).unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("Could not delete staging file: %s", e)
+    return result
 
 
 async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show how many items are waiting in the /text and /voice queues."""
+    chat_id = update.effective_chat.id
     await asyncio.to_thread(pending_expire, PENDING_QUEUE_TTL_HOURS)
     texts = await asyncio.to_thread(pending_list, chat_id, "text")
     voices = await asyncio.to_thread(pending_list, chat_id, "voice")
@@ -536,7 +550,7 @@ async def _link_job(update, context, url, status):
 
 async def _text_note_job(update, context, text, detail, status):
     """Turn a plain-text thought into a structured, categorized note."""
-    await analyze_and_save(
+    return await analyze_and_save(
         update, context, text[:12000], detail,
         source="telegram-text::manual note",
         source_type="text",
@@ -612,7 +626,17 @@ async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     status = StatusMessage(await update.message.reply_text(f"🔎 Researching “{topic}”…"))
-    await run_with_deadline(status, _research_topic(update, context, topic, status))
+    try:
+        await run_with_deadline(status, _research_topic(update, context, topic, status))
+    except ProviderRateLimitError as e:
+        logger.error(f"Rate Limit or Quota Exceeded: {e}")
+        await status.fail(f"⚠️ Quota excedida ou Rate Limit atingido no provider {e.provider}. Tente novamente mais tarde.\nDetalhes: {e}")
+    except AllProvidersFailedError as e:
+        logger.error(f"All providers failed: {[a.get('error') for a in e.attempts]}")
+        await _offer_model_switch(update, context)
+    except Exception as e:
+        logger.error(f"Research command failed: {e}")
+        pass
 
 
 async def _research_topic(update, context, topic, status):
@@ -795,10 +819,10 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     status = StatusMessage(await update.message.reply_text("🎬 Downloading & extracting audio track…"))
-    await run_with_deadline(status, _video_job(update, video, status))
+    await run_with_deadline(status, _video_job(update, context, video, status))
 
 
-async def _video_job(update, video, status):
+async def _video_job(update, context, video, status):
     """Download → ffmpeg audio → Whisper → summarize (under deadline)."""
     with tempfile.TemporaryDirectory() as tmp:
         file_obj = await video.get_file()
@@ -945,6 +969,12 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
             f"📎 Attachment: {attachment or 'none'}",
             disable_web_page_preview=True,
         )
+    except ProviderRateLimitError as e:
+        logger.error(f"Rate Limit or Quota Exceeded: {e}")
+        try:
+            await status.edit_text(f"⚠️ Quota excedida ou Rate Limit atingido no provider {e.provider}. Tente novamente mais tarde.\nDetalhes: {e}")
+        except Exception:
+            pass
     except AllProvidersFailedError as e:
         logger.error(f"Book pipeline failed — providers exhausted: {e.attempts}")
         try:
@@ -979,18 +1009,25 @@ async def analyze_and_save(
         note_dict = await analyze_content(
             text, detail_level, source_url=source_url, source_kind=source_kind
         )
+    except ProviderRateLimitError as e:
+        logger.error(f"Rate Limit or Quota Exceeded: {e}")
+        await update.message.reply_text(f"⚠️ Quota excedida ou Rate Limit atingido no provider {e.provider}. Tente novamente mais tarde.\nDetalhes: {e}")
+        e.handled = True
+        raise e
     except AllProvidersFailedError as e:
         logger.error(f"All providers failed: {[a.get('error') for a in e.attempts]}")
         await _offer_model_switch(update, context)
-        return
+        e.handled = True
+        raise e
     except Exception as e:
         logger.error(f"AI analysis failed: {e}")
-        await update.message.reply_text("❌ AI analysis failed. Check logs.")
-        return
+        await update.message.reply_text(f"❌ AI analysis failed. Error: {e}")
+        e.handled = True
+        raise e
 
     if not note_dict:
         await update.message.reply_text("❌ AI analysis returned nothing. Check logs.")
-        return
+        raise ValueError("AI analysis returned nothing")
 
     note_dict["source"] = source
     note_dict["source_type"] = source_type
@@ -1002,19 +1039,29 @@ async def analyze_and_save(
     note_path = write_note_to_vault(note_dict)
     if not note_path:
         await update.message.reply_text("❌ Could not write to Obsidian vault.")
-        return
+        raise OSError("Could not write to vault")
 
     if fingerprint:
         await arecord_processed(fingerprint, source_type, source, note_path)
 
     preview = (note_dict.get("content") or "")[:400]
     msg = f"✅ Saved to vault!\n📂 {note_path}\n\n📝 {note_dict.get('title')}\n---\n{preview}"
+    meta = note_dict.get("_meta_info", {})
+    if meta:
+        model_used = meta.get("model", "unknown")
+        usage = meta.get("usage")
+        if usage:
+            msg += f"\n\n🤖 Modelo: {model_used} | Tokens: {usage.get('total_tokens', 0)} ({usage.get('prompt_tokens', 0)} in, {usage.get('completion_tokens', 0)} out)"
+        else:
+            msg += f"\n\n🤖 Modelo: {model_used} (Tokens não reportados)"
+    
     if low_disk(VAULT_PATH):
         msg += f"\n\n⚠️ Disk space low: {format_disk(VAULT_PATH)}"
     await update.message.reply_text(
         msg,
         disable_web_page_preview=True,
     )
+    return True
 
 
 async def _offer_model_switch(update, context):

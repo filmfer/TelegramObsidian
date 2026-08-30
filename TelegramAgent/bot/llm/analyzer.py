@@ -195,7 +195,7 @@ async def analyze_content(
     prompt = build_prompt(detail, source_kind)
     payload = f"Source URL: {source_url}\n\n---\n\n{content}" if source_url else content
 
-    note_text = await chat(prompt, payload, max_tokens=8192)
+    note_text, meta_info = await chat(prompt, payload, max_tokens=8192)
     note_dict = _parse_response(note_text)
     if note_dict is None:
         return None
@@ -213,27 +213,24 @@ async def analyze_content(
                     note_dict["category"] = meta.get("category", "uncategorized")
                 if not note_dict.get("tags"):
                     note_dict["tags"] = meta.get("tags", [])
-        except AllProvidersFailedError:
-            raise
         except Exception as e:
             logger.warning(f"Metadata recovery skipped: {e}")
 
     note_dict.setdefault("content", "")
     note_dict["detail_level"] = detail
+    note_dict["_meta_info"] = meta_info
     return note_dict
 
 
 async def _extract_metadata(content: str) -> Optional[Dict[str, Any]]:
     """Cheap metadata-only extraction (title/category/tags)."""
     try:
-        raw = await chat(
+        raw, meta_info = await chat(
             METADATA_ONLY_PROMPT.replace("__CATS__", CATEGORIES),
             content[:6000],
             max_tokens=200,
         )
         return _parse_response(raw)
-    except AllProvidersFailedError:
-        raise
     except Exception as e:
         logger.error(f"Metadata extraction failed: {e}")
         return None
