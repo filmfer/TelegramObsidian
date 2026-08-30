@@ -31,6 +31,7 @@ from parsers.book_parser import (
 from parsers.audio_parser import (
     TranscriptionError,
     transcribe_audio,
+    transcribe_audio_long,
     transcribe_audio_local,
 )
 from parsers.search_parser import search_web
@@ -775,7 +776,12 @@ async def _youtube_job(update, context, url, video_id, detail, fingerprint, stat
 
 
 async def _yt_audio_fallback(video_id: str) -> Optional[str]:
-    """Layer 3: download audio (yt-dlp) + transcribe free (Groq, then local)."""
+    """Layer 3: download audio (yt-dlp) + transcribe ANY length.
+
+    `transcribe_audio_long` handles the split: files ≤ ~24MB go to Groq in
+    one call, larger files are segmented (15-min, `AUDIO_SEGMENT_SECONDS`)
+    with ffmpeg, transcribed per segment (Groq → local fallback) and merged.
+    """
     import tempfile
 
     proxy = os.getenv("YOUTUBE_PROXY_URL") or None
@@ -792,15 +798,10 @@ async def _yt_audio_fallback(video_id: str) -> Optional[str]:
                 mp3 = str(p)
                 break
         try:
-            return await asyncio.to_thread(transcribe_audio, mp3)  # Groq (fast)
+            return await transcribe_audio_long(mp3)
         except TranscriptionError as e:
-            logger.warning(f"Groq transcription of YouTube audio failed: {e}")
-            try:
-                # free local fallback for long files (no size cap)
-                return await asyncio.to_thread(transcribe_audio_local, mp3)
-            except TranscriptionError as e2:
-                logger.error(f"Local transcription failed too: {e2}")
-                return None
+            logger.error(f"Long-audio transcription failed for {video_id}: {e}")
+            return None
 
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -839,7 +840,10 @@ async def _video_job(update, context, video, status):
             await status.fail(str(e))
             return
         try:
-            transcript = await transcribe_audio(out_mp3)
+            transcript = await transcribe_audio_long(
+                out_mp3,
+                progress_cb=status.update,
+            )
         except TranscriptionError as e:
             await status.fail(f"Transcription failed: {e}")
             return

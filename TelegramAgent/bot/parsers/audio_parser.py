@@ -1,15 +1,19 @@
 """Audio/voice transcription via the free Groq Whisper API.
 
 Telegram voice messages (.ogg/opus) are accepted directly by Groq —
-no ffmpeg conversion needed.
+no ffmpeg conversion needed. Long audio (> ~20 min of a 64kbps stream,
+which exceeds Groq's 25MB per-request cap) is split into 15-minute
+segments with ffmpeg, transcribed per segment, and re-joined.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import os
+import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -18,6 +22,10 @@ logger = logging.getLogger(__name__)
 GROQ_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 WHISPER_MODEL = "whisper-large-v3"
 MAX_AUDIO_BYTES = 25 * 1024 * 1024  # Groq limit: 25 MB
+# Safe per-request cap so even a small size spike stays under 25MB.
+DEFAULT_MAX_GROQ_MB = int(os.getenv("AUDIO_MAX_GROQ_MB", "24"))
+# Segment length for long files (seconds → 15 min by default).
+DEFAULT_SEGMENT_SECONDS = int(os.getenv("AUDIO_SEGMENT_SECONDS", "900"))
 
 
 class TranscriptionError(Exception):
@@ -117,3 +125,165 @@ def transcribe_audio_local(file_path: str, language: Optional[str] = None) -> st
     except Exception as e:
         logger.error(f"Local Whisper transcription failed: {e}")
         raise TranscriptionError(f"Local transcription failed: {e}")
+
+
+# ---- Long-audio support (split into segments, transcribe each, re-join) ----
+
+try:
+    from typing import Protocol
+
+    class ProgressCallback(Protocol):
+        """Called (index, total, message) as long transcription progresses."""
+
+        def __call__(self, index: int, total: int, message: str) -> None: ...
+
+except Exception:  # pragma: no cover
+    pass
+
+
+def audio_duration_seconds(file_path: str) -> float:
+    """Return media duration in seconds via ffprobe (0.0 if it fails)."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            file_path,
+        ]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if out.returncode != 0:
+            logger.warning(f"ffprobe failed for {file_path}: {out.stderr[-200:]}")
+            return 0.0
+        return float(out.stdout.strip())
+    except Exception as e:
+        logger.warning(f"Could not read duration of {file_path}: {e}")
+        return 0.0
+
+
+def split_audio_segments(
+    file_path: str,
+    segment_seconds: int = DEFAULT_SEGMENT_SECONDS,
+    out_dir: Optional[str] = None,
+) -> list:
+    """
+    Split an audio file into ~`segment_seconds`-long mp3 segments with ffmpeg.
+
+    Returns a sorted list of segment paths. Raises RuntimeError on failure.
+    """
+    src = Path(file_path)
+    out = Path(out_dir) if out_dir else src.parent
+    out.mkdir(parents=True, exist_ok=True)
+    pattern = str(out / "seg_%03d.mp3")
+
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-f", "segment", "-segment_time", str(segment_seconds),
+        "-ar", "16000", "-ac", "1", "-b:a", "48k",
+        pattern,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    except FileNotFoundError:
+        raise RuntimeError("ffmpeg is not installed on the host/container.")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg segment split timed out.")
+    if proc.returncode != 0:
+        tail = (proc.stderr or "")[-300:]
+        raise RuntimeError(f"ffmpeg segment split failed: {tail}")
+
+    segments = sorted(out.glob("seg_*.mp3"))
+    if not segments:
+        raise RuntimeError("ffmpeg produced no segments.")
+    return [str(s) for s in segments]
+
+
+def _fmt_ts(seconds: int) -> str:
+    """'0:00:00' style timestamp for segment markers."""
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}"
+
+
+async def _call_progress(progress_cb, index, total, message):
+    """Invoke a progress callback, awaiting it if it returns a coroutine."""
+    if progress_cb is None:
+        return
+    result = progress_cb(index, total, message)
+    if asyncio.iscoroutine(result):
+        await result
+
+
+async def transcribe_audio_long(
+    file_path: str,
+    language: Optional[str] = None,
+    progress_cb: Optional[Callable] = None,
+) -> str:
+    """
+    Transcribe audio of ANY length (tested to ~2h YouTube audio).
+
+    - Files that fit under Groq's 25MB cap → one `transcribe_audio` call.
+    - Larger files → split into `AUDIO_SEGMENT_SECONDS` (default 15 min)
+      segments via ffmpeg, transcribe each with Groq (falling back to
+      local faster-whisper per segment), then re-join with [00:00–15:00]
+      markers so the final note keeps chronological structure.
+    """
+    path = Path(file_path)
+    size_mb = path.stat().st_size / (1024 * 1024)
+    duration = audio_duration_seconds(str(path))
+
+    # Small enough → single-shot fast path (behaviour unchanged).
+    if size_mb <= DEFAULT_MAX_GROQ_MB:
+        await _call_progress(progress_cb, 1, 1, "Transcribing audio…")
+        return await transcribe_audio(str(path), language)
+
+    # Long file → segment + transcribe + re-join.
+    seg_seconds = DEFAULT_SEGMENT_SECONDS
+    if duration:
+        n_est = max(1, round(duration / seg_seconds))
+        await _call_progress(
+            progress_cb, 0, n_est,
+            f"Splitting audio into ~{seg_seconds // 60}-min segments…",
+        )
+
+    logger.info(
+        f"Long audio detected: {size_mb:.1f}MB, ~{duration / 60:.1f}min "
+        f"— splitting into {seg_seconds // 60}-min segments."
+    )
+    segment_paths = split_audio_segments(str(path), seg_seconds)
+    total = len(segment_paths)
+    parts: list = []
+
+    for i, seg in enumerate(segment_paths, 1):
+        try:
+            await _call_progress(
+                progress_cb, i, total, f"Transcribing segment {i}/{total}…"
+            )
+            part = await transcribe_audio(seg, language)
+        except TranscriptionError as e:
+            logger.warning(f"Segment {i} Groq failed ({e}) — trying local Whisper.")
+            try:
+                part = await asyncio.to_thread(transcribe_audio_local, seg, language)
+            except TranscriptionError as e2:
+                logger.error(f"Segment {i} local transcription failed too: {e2}")
+                parts.append(f"[{_fmt_ts((i - 1) * seg_seconds)}] (segment failed)")
+                continue
+        start_ts = _fmt_ts((i - 1) * seg_seconds)
+        end_ts = _fmt_ts(i * seg_seconds)
+        parts.append(f"[{start_ts}–{end_ts}]\n{part.strip()}")
+
+    if not parts:
+        raise TranscriptionError("No segments could be transcribed.")
+
+    # Cleanup segments.
+    for seg in segment_paths:
+        try:
+            Path(seg).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    joined = "\n\n".join(parts)
+    logger.info(
+        f"Transcribed long audio {path.name}: {len(parts)} segments, "
+        f"{len(joined)} chars total."
+    )
+    return joined
