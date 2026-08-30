@@ -28,7 +28,9 @@ DEFAULT_FALLBACKS = [
     m.strip()
     for m in os.getenv(
         "LLM_FALLBACKS",
-        "groq/openai/gpt-oss-120b,groq/llama-3.1-8b-instant,gemini/gemini-pro-latest",
+        "groq/openai/gpt-oss-120b,groq/llama-3.1-8b-instant,"
+        "openrouter/deepseek/deepseek-chat:free,zhipu/glm-4-flash,"
+        "gemini/gemini-pro-latest",
     ).split(",")
     if m.strip()
 ]
