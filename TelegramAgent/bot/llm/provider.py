@@ -111,8 +111,31 @@ def _provider_ready(prefix: str) -> bool:
         "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
         "groq": ("GROQ_API_KEY",),
         "openrouter": ("OPENROUTER_API_KEY",),
+        "zhipu": ("ZHIPU_API_KEY",),
+        "ollama": ("OLLAMA_HOST",),
     }
     return any(os.getenv(k) for k in keys.get(prefix, []))
+
+
+def _provider_from_model(model: str) -> str:
+    """Extract the provider prefix from a litellm model id."""
+    return model.split("/")[0].split(":")[0] if "/" in model else model
+
+
+_RATE_LIMIT_HINTS = (
+    "429",
+    "quota",
+    "rate limit",
+    "too many requests",
+    "insufficient_quota",
+    "queries per day",
+)
+
+
+def _is_rate_limit_error(text: str) -> bool:
+    """True when an error string indicates a quota/rate-limit condition."""
+    t = text.lower()
+    return any(h in t for h in _RATE_LIMIT_HINTS)
 
 
 async def list_available_models() -> Dict[str, List[str]]:
@@ -254,14 +277,26 @@ async def validate_and_autoswitch() -> Optional[str]:
 
 # ------------------------------------------------------------ completion ---
 
-async def chat(system_prompt: str, user_content: str, max_tokens: int = 8192) -> str:
+async def chat(system_prompt: str, user_content: str, max_tokens: int = 8192) -> tuple:
     """
     Run a completion trying the current model first, then fallbacks.
-    Raises AllProvidersFailedError if everything fails.
-    Models detected as removed are skipped immediately.
+
+    - Only providers with credentials are attempted (skips dead/no-key noise).
+    - If ALL attempted models fail with quota/rate-limit → raises
+      ProviderRateLimitError (so the bot tells the user to wait or add a key).
+    - Any other mix of failures → AllProvidersFailedError with a per-model
+      summary so the caller can show exactly what happened.
+    - On successful fallback the working model becomes the new current model
+      (persisted), so the quota-trapped model isn't tried again on the next call.
+    Returns (text, meta_info) where meta_info = {"model": ..., "usage": ...}.
     """
     current = get_current_model()
-    chain = [current] + [m for m in get_fallbacks(current) if m != current]
+    all_models = [current] + [m for m in get_fallbacks(current) if m != current]
+    # Only try providers we actually have credentials for.
+    chain = [m for m in all_models if _provider_ready(_provider_from_model(m))]
+    if not chain:
+        chain = all_models  # provider-agnostic configs (custom base_url) stay usable
+
     attempts: List[Dict[str, str]] = []
 
     for model in chain:
@@ -273,6 +308,11 @@ async def chat(system_prompt: str, user_content: str, max_tokens: int = 8192) ->
                 max_tokens=max_tokens,
             )
             if resp:
+                # A fallback worked while the current model didn't → persist the
+                # switch so the next request doesn't waste a call on the dead quota.
+                if model != current:
+                    logger.info(f"Auto-switching current model to '{model}' (fallback succeeded)")
+                    set_current_model(model)
                 return resp, {"model": model, "usage": usage_dict}
             attempts.append({"model": model, "error": "empty response"})
         except Exception as e:
@@ -281,31 +321,24 @@ async def chat(system_prompt: str, user_content: str, max_tokens: int = 8192) ->
             if any(p in err for p in MODEL_ERROR_PATTERNS):
                 logger.warning(f"Model '{model}' appears unavailable: {e}")
                 continue  # dead model — straight to next in chain
-            
+
             # Identify Quota / Rate limit
-            if "429" in err or "quota" in err or "rate limit" in err or "too many requests" in err:
+            if _is_rate_limit_error(err):
                 logger.warning(f"Rate limit or Quota exceeded on '{model}': {e}")
-                import litellm
-                if isinstance(e, litellm.exceptions.RateLimitError):
-                    # We might be able to get reset time but it's hard without the raw headers.
-                    pass
-                # Keep trying fallbacks, but record that this was a rate limit.
-                
+                continue  # keep trying fallbacks, but record this as a rate limit
+
             logger.error(f"Completion failed on '{model}': {e}")
 
-    # If all failed, check if most were rate limits
-    rate_limits = [a for a in attempts if "429" in a.get("error", "").lower() or "quota" in a.get("error", "").lower() or "rate limit" in a.get("error", "").lower()]
-    if len(rate_limits) > 0 and len(rate_limits) == len(chain):
+    # Classify the failure mode.
+    rate_limits = [a for a in attempts if _is_rate_limit_error(a.get("error", ""))]
+    if len(rate_limits) == len(chain) and len(chain) > 0:
+        provider = current.split("/")[0] if "/" in current else current
         raise ProviderRateLimitError(
-            f"Quota exceeded or Rate Limit hit on all providers. Details: {rate_limits[0].get('error')}", 
-            provider=current.split("/")[0] if "/" in current else current
+            f"Quota exceeded or Rate Limit hit on all configured providers "
+            f"({provider}). Details: {rate_limits[0].get('error')}",
+            provider=provider,
         )
-    if len(rate_limits) > 0:
-         raise ProviderRateLimitError(
-            f"Quota exceeded or Rate Limit hit. Details: {rate_limits[0].get('error')}", 
-            provider=current.split("/")[0] if "/" in current else current
-        )
-        
+
     raise AllProvidersFailedError("All LLM providers failed.", attempts)
 
 

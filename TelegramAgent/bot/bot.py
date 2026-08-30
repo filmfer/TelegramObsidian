@@ -665,7 +665,7 @@ async def _research_topic(update, context, topic, status):
     payload = "\n\n---\n\n".join(sources_payload)
 
     await status.update("🧠 Synthesizing research…")
-    note_text = await chat(prompt, payload, max_tokens=6000)
+    note_text, _ = await chat(prompt, payload, max_tokens=6000)
 
     note_dict = _parse_response(note_text)
     if not note_dict:
@@ -743,7 +743,8 @@ async def _youtube_job(update, context, url, video_id, detail, fingerprint, stat
         f"Video URL: {url}\nTitle: {title}\nChannel: {author}\n\n"
         f"Transcript:\n{transcript[:50000]}"
     )
-    note_dict = _parse_response(await chat(VIDEO_PROMPT.format(categories=CATEGORIES), payload, max_tokens=6000))
+    note_text, _ = await chat(VIDEO_PROMPT.format(categories=CATEGORIES), payload, max_tokens=6000)
+    note_dict = _parse_response(note_text)
     if not note_dict:
         await status.fail("Video summarization failed.")
         return
@@ -911,7 +912,8 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
             prompt = BOOK_SECTION_PROMPT.format(
                 section_num=i, total=total, book_title=title, authors=authors
             )
-            extractions.append(f"## Section {i}\n{await chat(prompt, chunk, max_tokens=2500)}")
+            section_text, _ = await chat(prompt, chunk, max_tokens=2500)
+            extractions.append(f"## Section {i}\n{section_text}")
             if i % 2 == 0 or i == total:
                 try:
                     await status.edit_text(
@@ -924,7 +926,7 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
         await status.edit_text(f"📚 Merging {total} sections into your study note…")
         final_prompt = BOOK_FINAL_PROMPT.format(book_title=title, authors=authors)
         merged = "\n\n".join(extractions)
-        final_note = await chat(final_prompt, merged[-100000:], max_tokens=8000)
+        final_note, _ = await chat(final_prompt, merged[-100000:], max_tokens=8000)
 
         note_dict = _parse_response(final_note)
         if not note_dict or not note_dict.get("content"):
