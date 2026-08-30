@@ -89,7 +89,8 @@ Books get **multi-label categories** + a *Related Topics* hashtag section, so
 the Obsidian graph connects them to every other note on the topic.
 `/organize` tidies the vault later: sparse folders are merged into bigger
 ones using `config/category_taxonomy.yaml` (protected folders, manual
-mappings and a note-count threshold) — always with your confirmation.
+mappings, keyword rules and a note-count threshold) — sub-category folders
+move **intact** under the target — always with your confirmation.
 
 ### 🔄 Multi-device sync without conflicts
 
@@ -121,7 +122,8 @@ flowchart LR
 
 **Resilience built in:** if a model is deprecated or down, the fallback chain kicks in,
 the bot alerts you on Telegram and offers a live menu of working models — tap to switch.
-A weekly health check auto-updates the catalog.
+No noisy scheduled checks: the catalog is probed only when you ask (`/models`)
+or when a quota error exhausts the chain (then it auto-switches to a free model).
 
 ---
 
@@ -184,15 +186,16 @@ LLM_MODEL=gemini/gemini-flash-latest          # primary (auto-tracks newest flas
 LLM_FALLBACKS=groq/openai/gpt-oss-120b,gemini/gemini-pro-latest
 ```
 
-**Never worry about deprecations again:** the bot detects dead models,
-auto-switches to the best free alternative, and notifies you — weekly checks included.
+**Never worry about deprecations again:** the bot detects dead models and
+auto-switches to the best free alternative when you pick models (`/models`)
+or when quota runs out — no unsolicited check messages.
 
 ---
 
 ## 🗺️ Roadmap
 
 - [x] v1.0 — Documents · links · e-books · multi-category vault · Docker deploy
-- [x] v1.1 — Multi-provider LLM · `/models` live switching · weekly health checks · text notes · knowledge-note format
+- [x] v1.1 — Multi-provider LLM · `/models` live switching · text notes · knowledge-note format
 - [x] Voice notes → free Whisper transcription (Groq) → notes; caption `research` = deep search
 - [x] `/research <topic>` — DuckDuckGo + scrape top sources + cited synthesis
 - [x] YouTube/video links → transcript summaries; uploaded videos (≤20MB) → ffmpeg + Whisper
@@ -200,6 +203,7 @@ auto-switches to the best free alternative, and notifies you — weekly checks i
 - [x] v1.5 — Book notes rebuilt: real chapter detection (EPUB/FB2 TOC, PDF headings) → detailed per-chapter summaries → note assembled locally (no truncation) + complete book saved as Markdown in `90_Attachments/BookTexts/`
 - [x] v1.2 — Dedup store (`--force`) · `/text` + `/voice` queues · error handler + 10-min deadlines · thumbnails · `/organize`
 - [x] v1.3 — YouTube 3-layer fallback (up to 1h30+ free with yt-dlp & faster-whisper) · Disk-space monitoring (`/disk` + 6h proactive alerts) · Resilient `/organize` · rclone VFS cache auto-heals
+- [x] v1.6 — `/organize` concentration: keyword-based merges into broad categories, recursive note counting, sub-category folders preserved · model checks only on request or quota exhaustion (no unsolicited messages) · `/organize` in `/help`
 - [ ] Semantic search over the vault (`/search <query>`)
 - [ ] Photo/screenshot OCR ingestion
 - [ ] Weekly review notes

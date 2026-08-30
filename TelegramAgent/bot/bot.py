@@ -67,7 +67,7 @@ from llm.provider import (
     validate_and_autoswitch,
 )
 from storage.vault_writer import derive_detail_level, write_note_to_vault
-from storage.vault_organizer import apply_merge, build_merge_plan
+from storage.vault_organizer import apply_merge, build_merge_plan, make_keyword_suggester
 from storage.dedup_store import (
     acheck_duplicate,
     arecord_processed,
@@ -169,7 +169,6 @@ async def _fetch_thumbnail(img_url: str, slug: str) -> str:
             return ""
     return ""
 
-WEEKLY_SECONDS = 7 * 24 * 60 * 60
 MAX_MODEL_BUTTONS = 30
 
 
@@ -190,7 +189,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/research <topic> — deep web research, cited sources\n"
         "Detail levels: /summarize /detailed /precise /raw /book\n"
                 "LLM models: /models\n"
-        "/disk — check vault disk space\n\n"
+        "/disk — check vault disk space\n"
+        "/organize preview — tidy sparse categories into broad ones (plan only)\n"
+        "/organize — apply the proposed category merges (asks confirmation)\n\n"
         "Duplicates are detected automatically — send with '--force' to override."
     )
 
@@ -476,7 +477,9 @@ async def organize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     preview = bool(context.args) and context.args[0].lower() == "preview"
     status = StatusMessage(await update.message.reply_text("🧹 Analyzing vault categories…"))
     try:
-        plan = await asyncio.to_thread(build_merge_plan, VAULT_PATH)
+        plan = await asyncio.to_thread(
+            build_merge_plan, VAULT_PATH, make_keyword_suggester()
+        )
     except Exception as e:
         logger.exception("Failed to build organize plan")
         await status.fail(
@@ -638,7 +641,7 @@ async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await run_with_deadline(status, _research_topic(update, context, topic, status))
     except ProviderRateLimitError as e:
         logger.error(f"Rate Limit or Quota Exceeded: {e}")
-        await status.fail(f"⚠️ Quota excedida ou Rate Limit atingido no provider {e.provider}. Tente novamente mais tarde.\nDetalhes: {e}")
+        await status.fail(await _quota_error_text(e))
     except AllProvidersFailedError as e:
         logger.error(f"All providers failed: {[a.get('error') for a in e.attempts]}")
         await _offer_model_switch(update, context)
@@ -1036,7 +1039,7 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
     except ProviderRateLimitError as e:
         logger.error(f"Rate Limit or Quota Exceeded: {e}")
         try:
-            await status.edit_text(f"⚠️ Quota excedida ou Rate Limit atingido no provider {e.provider}. Tente novamente mais tarde.\nDetalhes: {e}")
+            await status.edit_text(await _quota_error_text(e))
         except Exception:
             pass
     except AllProvidersFailedError as e:
@@ -1075,7 +1078,7 @@ async def analyze_and_save(
         )
     except ProviderRateLimitError as e:
         logger.error(f"Rate Limit or Quota Exceeded: {e}")
-        await update.message.reply_text(f"⚠️ Quota excedida ou Rate Limit atingido no provider {e.provider}. Tente novamente mais tarde.\nDetalhes: {e}")
+        await update.message.reply_text(await _quota_error_text(e))
         e.handled = True
         raise e
     except AllProvidersFailedError as e:
@@ -1151,19 +1154,26 @@ async def _offer_model_switch(update, context):
     )
 
 
-# ---- Weekly model health check ----
+# ---- Model check (only on user request or when quota is exhausted) ----
 
-async def weekly_model_check_job(context: ContextTypes.DEFAULT_TYPE):
-    """Runs at startup + once a week: refresh catalog, auto-switch if needed."""
-    report = await validate_and_autoswitch()
-    chat_id = (context.job.data or {}).get("chat_id") or TELEGRAM_CHAT_ID
-    if report and chat_id:
-        try:
-            await context.bot.send_message(
-                chat_id=int(chat_id), text=f"🩺 Model check\n\n{report}"
-            )
-        except Exception as e:
-            logger.error(f"Could not deliver model-check report: {e}")
+async def _quota_error_text(e: Exception) -> str:
+    """
+    Error text for quota exhaustion. Only NOW do we run the auto-switch check —
+    never proactively, so no unsolicited "model check" messages are sent.
+    """
+    provider = getattr(e, "provider", "unknown")
+    text = (
+        f"⚠️ Quota excedida ou Rate Limit atingido no provider {provider}. "
+        f"Tente novamente mais tarde.\nDetalhes: {e}"
+    )
+    try:
+        report = await validate_and_autoswitch()
+    except Exception as ex:
+        logger.warning(f"Post-quota autoswitch check failed: {ex}")
+        report = None
+    if report:
+        text += f"\n\n🩺 {report}"
+    return text
 
 
 # ---- Disk-space monitoring (Task: warn when free space < 20%) ----
@@ -1205,15 +1215,9 @@ async def _maybe_send_disk_alert(bot):
 
 
 async def post_init(application: Application):
-    """Startup tasks: schedule jobs + run first check immediately."""
+    """Startup tasks: schedule the disk job only. Model checks never run
+    proactively — they happen on /models (user request) or when quota runs out."""
     if application.job_queue:
-        application.job_queue.run_repeating(
-            weekly_model_check_job,
-            interval=WEEKLY_SECONDS,
-            first=20,
-            name="weekly_model_check",
-            data={"chat_id": TELEGRAM_CHAT_ID},
-        )
         application.job_queue.run_repeating(
             disk_check_job,
             interval=DISK_JOB_HOURS * 3600,
@@ -1221,15 +1225,6 @@ async def post_init(application: Application):
             name="disk_check",
             data={"chat_id": TELEGRAM_CHAT_ID},
         )
-    try:
-        report = await validate_and_autoswitch()
-        if report and TELEGRAM_CHAT_ID:
-            await application.bot.send_message(
-                chat_id=int(TELEGRAM_CHAT_ID),
-                text=f"🩺 Startup model check\n\n{report}",
-            )
-    except Exception as e:
-        logger.warning(f"Startup model check failed: {e}")
 
     # Initial disk check (sends an alert immediately if already low).
     await _maybe_send_disk_alert(application.bot)

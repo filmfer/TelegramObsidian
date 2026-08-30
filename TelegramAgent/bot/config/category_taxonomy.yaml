@@ -12,5 +12,18 @@ manual:
   Docker: Programming
   Machine-Learning: AI
 
+# Keyword rules: a sparse folder whose name contains one of these keywords
+# (case-insensitive) is merged into the matching broad category — but only
+# when that category is a "keeper" (>= threshold notes). `manual` wins first.
+keywords:
+  Programming: [python, javascript, typescript, code, dev, git, software, web, sql, database]
+  AI: [ai, llm, gpt, neural, machine-learning, prompt, chatbot, agent]
+  Finance: [money, invest, budget, crypto, tax, stocks, bank, savings]
+  Car: [car, auto, vehicle, mechanic, engine, tyre, tire]
+  Religion: [bible, faith, theology, church, spiritual, scripture]
+  Food: [diet, nutrition, recipe, cooking, meal, food]
+  Travel: [trip, flight, vacation, hotel, itinerary, travel]
+  Hacking: [hack, pentest, security, ctf, exploit]
+
 # Folders with fewer notes than this become merge candidates.
 threshold: 3

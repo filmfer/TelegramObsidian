@@ -17,6 +17,7 @@ from storage.vault_organizer import (  # noqa: E402
     apply_merge,
     build_merge_plan,
     load_taxonomy,
+    make_keyword_suggester,
     scan_categories,
 )
 
@@ -84,6 +85,57 @@ check("Note body preserved", "Body of o1" in text)
 
 log = vault / "10_Categories" / "_organize_log.md"
 check("Organize log written", log.is_file() and "OddStuff" in log.read_text(encoding="utf-8"))
+
+# ---- v1.6: recursive counting · sub-folder preservation · keyword suggester ----
+# The earlier blocks point CATEGORY_TAXONOMY_PATH at a minimal temp taxonomy;
+# restore the repo default (with manual mappings + keywords) for these blocks.
+os.environ.pop("CATEGORY_TAXONOMY_PATH", None)
+
+with tempfile.TemporaryDirectory() as td:
+    vault = Path(td)
+    # Notes only inside sub-folders → must still be counted (rglob)
+    (vault / "ML" / "Papers").mkdir(parents=True)
+    (vault / "ML" / "Papers" / "a.md").write_text("---\ncategory: ML\n---\nx\n")
+    (vault / "ML" / "Papers" / "b.md").write_text("---\ncategory: ML\n---\nx\n")
+    (vault / "ML" / "Papers" / "c.md").write_text("---\ncategory: ML\n---\nx\n")
+    (vault / "ML" / "Papers" / "d.md").write_text("---\ncategory: ML\n---\nx\n")
+    counts = scan_categories(str(vault))
+    check("Recursive count sees sub-folder notes", counts.get("ML") == 4)
+
+with tempfile.TemporaryDirectory() as td:
+    vault = Path(td)
+    # Broad keeper + sparse folder with a sub-category inside
+    (vault / "Programming").mkdir()
+    for i in range(4):
+        (vault / "Programming" / f"p{i}.md").write_text("---\ncategory: Programming\n---\nx\n")
+    (vault / "Kubernetes").mkdir()
+    (vault / "Kubernetes" / "k.md").write_text("---\ncategory: Kubernetes\n---\nx\n")
+    (vault / "Kubernetes" / "Clusters").mkdir()
+    (vault / "Kubernetes" / "Clusters" / "c1.md").write_text("---\ncategory: Kubernetes\n---\nx\n")
+    plan = build_merge_plan(str(vault), make_keyword_suggester())
+    kmerge = [m for m in plan if m[0] == "Kubernetes"]
+    check("Manual merge planned for Kubernetes", bool(kmerge) and kmerge[0][1] == "Programming")
+    moved = apply_merge(str(vault), plan)
+    check("Notes moved", moved == 1)
+    check("Sparse folder removed", not (vault / "Kubernetes").exists())
+    check("Sub-folder preserved under target", (vault / "Programming" / "Clusters" / "c1.md").is_file())
+    note = vault / "Programming" / "k.md"
+    check("Merged note exists in target", note.is_file())
+    check("Sub-folder note intact", "category" in (vault / "Programming" / "Clusters" / "c1.md").read_text(encoding="utf-8"))
+
+with tempfile.TemporaryDirectory() as td:
+    vault = Path(td)
+    # Keyword-based suggestion (no manual entry): LLM-Notes → AI
+    (vault / "AI").mkdir()
+    for i in range(4):
+        (vault / "AI" / f"a{i}.md").write_text("---\ncategory: AI\n---\nx\n")
+    (vault / "LLM-Notes").mkdir()
+    (vault / "LLM-Notes" / "n.md").write_text("---\ncategory: LLM-Notes\n---\nx\n")
+    plan = build_merge_plan(str(vault), make_keyword_suggester())
+    check("Keyword suggestion LLM-Notes → AI", any(m[0] == "LLM-Notes" and m[1] == "AI" for m in plan))
+
+suggest = make_keyword_suggester()
+check("Keyword suggester no match → None", suggest("MiscNotes", ["AI", "Programming"]) is None)
 
 print("\n🎉 ALL ORGANIZER TESTS PASSED" if failures == 0 else f"\n💥 {failures} FAILURES")
 sys.exit(1 if failures else 0)

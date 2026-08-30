@@ -17,7 +17,7 @@ synced across all your devices.
 
 ```
 bot.py                     orchestrator: handlers, queues, deadlines, dedup
-llm/provider.py            litellm multi-provider fallback chain + /models + weekly health check
+llm/provider.py            litellm multi-provider fallback chain + /models; model checks run only on request or on quota exhaustion
 llm/analyzer.py            prompts (knowledge/research/video/book) + META_JSON parsing
 parsers/document_parser.py PDF · DOCX · XLSX · TXT · MD · JSON · CSV · EML
 parsers/link_parser.py     3-layer scraper (headers → cloudscraper → jina.ai), SSRF-safe, og:image
@@ -90,8 +90,8 @@ and `BOOK_FULLTEXT` in `.env`.
 | `/disk` | Check vault disk usage & warnings if space < 20% |
 | `/research <topic>` | Deep web research with cited sources |
 | `/models` | List working LLM models, tap to switch instantly |
-| `/organize preview` | Show which sparse category folders would be merged |
-| `/organize` | Propose merges → confirm via inline keyboard → applies with a git commit |
+| `/organize preview` | Show which sparse category folders would be merged (keyword rules + manual taxonomy; sub-folders preserved) |
+| `/organize` | Propose merges → confirm via inline keyboard → applies with a git commit; sub-category folders move intact under the target |
 | `/start` · `/help` | Full usage guide |
 
 ### Never lose work
@@ -109,8 +109,10 @@ and `BOOK_FULLTEXT` in `.env`.
 
 ## Multi-provider LLM
 
-Configured in `.env`; the bot probes providers at startup and **weekly**
-(auto-switching if a model dies), and you can always switch live:
+Configured in `.env`; **no scheduled health checks** — the catalog is probed
+only when you run `/models` or when a quota/rate-limit error exhausts the
+fallback chain (the bot then auto-switches to a working free model and tells
+you):
 
 ```ini
 LLM_MODEL=gemini/gemini-flash-latest
@@ -201,7 +203,7 @@ cd TelegramAgent/bot && docker compose up -d --build
 | `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` / `OLLAMA_HOST` | — | LLM providers (at least one) |
 | `LLM_MODEL` | `gemini/gemini-flash-latest` | preferred model (litellm format) |
 | `LLM_FALLBACKS` | see example | comma-separated fallback chain |
-| `TELEGRAM_CHAT_ID` | — | chat for proactive alerts (weekly model check) |
+| `TELEGRAM_CHAT_ID` | — | chat for proactive alerts (disk space) |
 | `OBSIDIAN_VAULT_PATH` | `/data/vault` | vault path **inside** the container |
 | `OBSIDIAN_VAULT_HOST_PATH` | `/srv/obsidian-vault` | host path bind-mounted into the container |
 | `DEDUP_DB_PATH` | `data/agent.db` | SQLite dedup + queue store |
@@ -220,7 +222,7 @@ cd TelegramAgent/bot && docker compose up -d --build
 
 | Symptom | Fix |
 |---|---|
-| `litellm.NotFoundError` / dead model errors | Run `/models` — the bot lists every reachable model; tap to switch. The weekly check also auto-heals. |
+| `litellm.NotFoundError` / dead model errors | Run `/models` — the bot lists every reachable model; tap to switch. Quota errors trigger an automatic free-model switch. |
 | Notes land in `uncategorized/` | The model's `META_JSON` was missing → the parser derives metadata; if it persists, switch models via `/models`. |
 | Bot says "already saved" for new content | It's the dedup store. Add `--force` to your message, or clear the DB: `docker compose exec telegram-agent rm /app/data/agent.db` then restart. |
 | Notes written but DB/Drive never syncs; `ls` shows **`Input/output error`** on the mount | The rclone mount has **no VFS cache** — writes don't settle. Fix the unit: add `--vfs-cache-mode writes --buffer-size 64M --vfs-read-ahead 128M --dir-cache-time 1m` to `ExecStart` and `systemctl restart`. No re-auth needed. |

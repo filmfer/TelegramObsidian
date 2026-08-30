@@ -46,6 +46,10 @@ def load_taxonomy() -> Dict:
     return {
         "protected": list(data.get("protected", [])),
         "manual": dict(data.get("manual", {})),
+        "keywords": {
+            str(broad).lower(): [str(k).lower() for k in (kws or [])]
+            for broad, kws in dict(data.get("keywords", {})).items()
+        },
         "threshold": int(data.get("threshold", 3)),
     }
 
@@ -58,6 +62,21 @@ def _create_default_taxonomy() -> dict:
             "Kubernetes": "Programming",
             "Docker": "Programming",
             "Machine-Learning": "AI",
+        },
+        "keywords": {
+            "Programming": ["python", "javascript", "typescript", "code", "dev",
+                            "git", "software", "web", "sql", "database"],
+            "AI": ["ai", "llm", "gpt", "neural", "machine-learning", "prompt",
+                   "chatbot", "agent"],
+            "Finance": ["money", "invest", "budget", "crypto", "tax", "stocks",
+                        "bank", "savings"],
+            "Car": ["car", "auto", "vehicle", "mechanic", "engine", "tyre", "tire"],
+            "Religion": ["bible", "faith", "theology", "church", "spiritual",
+                         "scripture"],
+            "Food": ["diet", "nutrition", "recipe", "cooking", "meal", "food"],
+            "Travel": ["trip", "flight", "vacation", "hotel", "itinerary",
+                       "travel"],
+            "Hacking": ["hack", "pentest", "security", "ctf", "exploit"],
         },
         "threshold": 3,
     }
@@ -94,7 +113,8 @@ def scan_categories(vault_root: str) -> Dict[str, int]:
         try:
             if not child.is_dir():
                 continue
-            n = len(list(child.glob("*.md")))
+            # Recursive: folders whose notes live in sub-categories still count
+            n = len(list(child.rglob("*.md")))
         except OSError as e:
             logger.warning(f"Skipping unreadable category folder {child}: {e}")
             continue
@@ -114,7 +134,11 @@ def build_merge_plan(
     """
     tax = load_taxonomy()
     counts = scan_categories(vault_root)
-    keepers = [c for c, n in counts.items() if n >= tax["threshold"]]
+    # Biggest keepers first — sparse folders merge into the dominant broad category
+    keepers = [
+        c for c, n in sorted(counts.items(), key=lambda kv: -kv[1])
+        if n >= tax["threshold"]
+    ]
 
     plan: List[Tuple[str, str, int]] = []
     for folder, count in sorted(counts.items(), key=lambda kv: kv[1]):
@@ -130,6 +154,26 @@ def build_merge_plan(
             if target and target != folder and target in keepers:
                 plan.append((folder, target, count))
     return plan
+
+
+def make_keyword_suggester() -> Callable[[str, List[str]], Optional[str]]:
+    """
+    Build a deterministic suggest_fn that maps sparse folders to broad
+    categories using the taxonomy `keywords:` rules — a merge is suggested
+    when a keyword appears (case-insensitive) inside the folder name.
+    Manual mappings in `manual:` always take precedence (checked earlier).
+    """
+    keywords = load_taxonomy().get("keywords", {})
+
+    def suggest(folder: str, keepers: List[str]) -> Optional[str]:
+        name = folder.lower()
+        for broad in keepers:
+            for kw in keywords.get(broad.lower(), []):
+                if kw and kw in name:
+                    return broad
+        return None
+
+    return suggest
 
 
 def _rewrite_frontmatter(note: Path, new_category: str, old_category: str) -> bool:
@@ -191,6 +235,23 @@ def apply_merge(vault_root: str, plan: List[Tuple[str, str, int]]) -> int:
                     moved += 1
                 except OSError as e:
                     logger.error(f"Move failed for {note}: {e}")
+        # Move sub-category folders as units — sub-structure is preserved
+        try:
+            subdirs = [s for s in src_dir.iterdir() if s.is_dir()]
+        except OSError as e:
+            logger.warning(f"Could not list {src_dir} sub-folders: {e}")
+            subdirs = []
+        for sub in subdirs:
+            dest = dst_dir / sub.name
+            if dest.exists():
+                logger.warning(
+                    f"Sub-folder conflict: {sub} → {dest} already exists — left in place"
+                )
+                continue
+            try:
+                shutil.move(str(sub), str(dest))
+            except OSError as e:
+                logger.error(f"Sub-folder move failed for {sub}: {e}")
         try:
             src_dir.rmdir()  # only succeeds when empty
         except OSError:
