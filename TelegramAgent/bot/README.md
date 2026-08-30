@@ -92,6 +92,7 @@ and `BOOK_FULLTEXT` in `.env`.
 | `/models` | List working LLM models, tap to switch instantly |
 | `/organize preview` | Show which sparse category folders would be merged (keyword rules + manual taxonomy; sub-folders preserved) |
 | `/organize` | Propose merges → confirm via inline keyboard → applies with a git commit; sub-category folders move intact under the target |
+| `/dashboard` | Rebuild `Recent Notes.md` at the vault root — newest notes per category (auto-refreshed weekly, silently) |
 | `/start` · `/help` | Full usage guide |
 
 ### Never lose work
@@ -214,6 +215,7 @@ cd TelegramAgent/bot && docker compose up -d --build
 | `DISK_ALERT_MINUTES` | `60` | anti-spam cooldown for proactive alerts |
 | `STAGING_DIR` | `data/staging` | queued audio staging area |
 | `CATEGORY_TAXONOMY_PATH` | `config/category_taxonomy.yaml` | `/organize` rules |
+| `DASHBOARD_DAYS` | `7` | window for the auto-generated `Recent Notes.md` |
 | `LOG_DIR` | `logs` | rotating log files |
 
 ---

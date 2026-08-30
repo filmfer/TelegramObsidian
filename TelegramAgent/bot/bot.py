@@ -68,6 +68,7 @@ from llm.provider import (
 )
 from storage.vault_writer import derive_detail_level, write_note_to_vault
 from storage.vault_organizer import apply_merge, build_merge_plan, make_keyword_suggester
+from storage.dashboard import write_dashboard
 from storage.dedup_store import (
     acheck_duplicate,
     arecord_processed,
@@ -126,6 +127,11 @@ DETAIL_LEVELS = {"summarize", "detailed", "precise", "raw", "book"}
 # Book pipeline tuning
 BOOK_MAX_CHAPTERS = int(os.getenv("BOOK_MAX_CHAPTERS", "60"))
 BOOK_FULLTEXT = os.getenv("BOOK_FULLTEXT", "true").strip().lower() in ("1", "true", "yes")
+# Recent-notes dashboard (silent weekly refresh — no Telegram messages)
+try:
+    DASHBOARD_DAYS = max(1, int(os.getenv("DASHBOARD_DAYS", "7")))
+except ValueError:
+    DASHBOARD_DAYS = 7
 USER_COOLDOWN_SECONDS = 10
 _user_last_request: dict = {}
 
@@ -191,7 +197,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "LLM models: /models\n"
         "/disk — check vault disk space\n"
         "/organize preview — tidy sparse categories into broad ones (plan only)\n"
-        "/organize — apply the proposed category merges (asks confirmation)\n\n"
+        "/organize — apply the proposed category merges (asks confirmation)\n"
+        "/dashboard — rebuild the \"Recent Notes\" note (newest per category)\n\n"
         "Duplicates are detected automatically — send with '--force' to override."
     )
 
@@ -1214,6 +1221,32 @@ async def _maybe_send_disk_alert(bot):
             logger.error(f"Could not send disk alert: {e}")
 
 
+# ---- Recent-notes dashboard (vault note — silent, no Telegram messages) ----
+
+async def dashboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rebuild Recent Notes.md at the vault root (newest per category)."""
+    path = await asyncio.to_thread(write_dashboard, VAULT_PATH)
+    if path:
+        await update.message.reply_text(
+            f"📊 Dashboard updated (last {DASHBOARD_DAYS} day(s)):\n"
+            f"📄 {path.name} — open it in Obsidian to see the newest notes per category."
+        )
+    else:
+        await update.message.reply_text(
+            f"No notes created in the last {DASHBOARD_DAYS} day(s) — nothing to show yet."
+        )
+
+
+async def dashboard_refresh_job(context: ContextTypes.DEFAULT_TYPE):
+    """Weekly silent refresh — only rewrites the vault note, never messages."""
+    try:
+        path = await asyncio.to_thread(write_dashboard, VAULT_PATH)
+        if path:
+            logger.info(f"Dashboard auto-refreshed: {path}")
+    except Exception as e:
+        logger.warning(f"Dashboard refresh failed: {e}")
+
+
 async def post_init(application: Application):
     """Startup tasks: schedule the disk job only. Model checks never run
     proactively — they happen on /models (user request) or when quota runs out."""
@@ -1224,6 +1257,12 @@ async def post_init(application: Application):
             first=45,
             name="disk_check",
             data={"chat_id": TELEGRAM_CHAT_ID},
+        )
+        application.job_queue.run_repeating(
+            dashboard_refresh_job,
+            interval=7 * 24 * 60 * 60,
+            first=90,
+            name="dashboard_refresh",
         )
 
     # Initial disk check (sends an alert immediately if already low).
@@ -1247,6 +1286,7 @@ def main():
     app.add_handler(CommandHandler("voice", voice_note_command))
     app.add_handler(CommandHandler("queue", queue_command))
     app.add_handler(CommandHandler("organize", organize_command))
+    app.add_handler(CommandHandler("dashboard", dashboard_command))
     app.add_handler(CallbackQueryHandler(organize_callback, pattern=r"^org:(yes|no)$"))
     for cmd in ("summarize", "detailed", "precise", "raw", "book"):
         app.add_handler(CommandHandler(cmd, set_detail_command))

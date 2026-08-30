@@ -57,6 +57,7 @@ Send with a caption or `/command`:
 | `/precise` | Exact data extraction — every number preserved |
 | `/raw` | Verbatim text, metadata only |
 | `/book` | Book mode: title, author(s), year + chapter summaries + full-text Markdown (background) |
+| `/dashboard` | Rebuilds `Recent Notes.md` in the vault — newest notes per category (weekly silent refresh) |
 
 ### ⌨️ Commands
 
@@ -204,6 +205,7 @@ or when quota runs out — no unsolicited check messages.
 - [x] v1.2 — Dedup store (`--force`) · `/text` + `/voice` queues · error handler + 10-min deadlines · thumbnails · `/organize`
 - [x] v1.3 — YouTube 3-layer fallback (up to 1h30+ free with yt-dlp & faster-whisper) · Disk-space monitoring (`/disk` + 6h proactive alerts) · Resilient `/organize` · rclone VFS cache auto-heals
 - [x] v1.6 — `/organize` concentration: keyword-based merges into broad categories, recursive note counting, sub-category folders preserved · model checks only on request or quota exhaustion (no unsolicited messages) · `/organize` in `/help`
+- [x] v1.7 — `/dashboard`: auto-generated `Recent Notes.md` in the vault (newest notes per category, plain wikilinks — no plugin needed) · silent weekly refresh · `DASHBOARD_DAYS` window
 - [ ] Semantic search over the vault (`/search <query>`)
 - [ ] Photo/screenshot OCR ingestion
 - [ ] Weekly review notes
