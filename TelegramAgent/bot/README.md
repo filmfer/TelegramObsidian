@@ -118,7 +118,7 @@ you):
 
 ```ini
 LLM_MODEL=gemini/gemini-flash-latest
-LLM_FALLBACKS=groq/openai/gpt-oss-120b,groq/llama-3.1-8b-instant,openrouter/deepseek/deepseek-chat:free,zhipu/glm-4-flash,gemini/gemini-pro-latest
+LLM_FALLBACKS=groq/openai/gpt-oss-120b,groq/llama-3.1-8b-instant,openrouter/deepseek/deepseek-chat:free,zai/glm-4-flash,gemini/gemini-pro-latest
 ```
 
 | Provider | Key | Free tier |
@@ -126,7 +126,7 @@ LLM_FALLBACKS=groq/openai/gpt-oss-120b,groq/llama-3.1-8b-instant,openrouter/deep
 | Google Gemini (default) | `GEMINI_API_KEY` | generous free tier |
 | Groq | `GROQ_API_KEY` | free Llama + **free Whisper** (audio) |
 | OpenRouter | `OPENROUTER_API_KEY` | many `:free` models (DeepSeek, Qwen, Llama) |
-| Zhipu (China) | `ZHIPU_API_KEY` | **GLM-4-Flash 100% free** |
+| Zhipu / Z.AI (China) | `ZAI_API_KEY` (or legacy `ZHIPU_API_KEY`) | **GLM-4-Flash 100% free** |
 | Ollama (local) | `OLLAMA_HOST` | fully local, no key, unlimited |
 
 `/models` shows every currently-reachable model with a tap-to-switch menu.

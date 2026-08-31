@@ -29,7 +29,7 @@ DEFAULT_FALLBACKS = [
     for m in os.getenv(
         "LLM_FALLBACKS",
         "groq/openai/gpt-oss-120b,groq/llama-3.1-8b-instant,"
-        "openrouter/deepseek/deepseek-chat:free,zhipu/glm-4-flash,"
+                "openrouter/deepseek/deepseek-chat:free,zai/glm-4-flash,"
         "gemini/gemini-pro-latest",
     ).split(",")
     if m.strip()
@@ -111,15 +111,22 @@ def _provider_ready(prefix: str) -> bool:
         "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
         "groq": ("GROQ_API_KEY",),
         "openrouter": ("OPENROUTER_API_KEY",),
-        "zhipu": ("ZHIPU_API_KEY",),
+                "zai": ("ZHIPU_API_KEY", "ZAI_API_KEY"),
         "ollama": ("OLLAMA_HOST",),
     }
     return any(os.getenv(k) for k in keys.get(prefix, []))
 
 
 def _provider_from_model(model: str) -> str:
-    """Extract the provider prefix from a litellm model id."""
-    return model.split("/")[0].split(":")[0] if "/" in model else model
+    """Extract the provider prefix from a litellm model id.
+
+    Normalises legacy aliases so litellm 1.83+ recognises them::
+        zhipu/...   -> zai/...     (Zhipu / Z.AI rebrand)
+    """
+    prefix = model.split("/")[0].split(":")[0] if "/" in model else model
+    if prefix == "zhipu":
+        return "zai"
+    return prefix
 
 
 _RATE_LIMIT_HINTS = (
