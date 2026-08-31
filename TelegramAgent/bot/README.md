@@ -24,6 +24,7 @@ parsers/link_parser.py     3-layer scraper (headers → cloudscraper → jina.ai
 parsers/book_parser.py     e-book metadata + text (PDF/EPUB/MOBI/AZW/AZW3/AZW4/DJVU/FB2/LIT)
 parsers/audio_parser.py    Groq Whisper transcription
 parsers/video_parser.py    YouTube metadata/transcript; uploaded video → ffmpeg audio
+parsers/image_parser.py    image/album ingestion → LLM vision (VISION_MODEL) → Tesseract OCR fallback
 parsers/search_parser.py   DuckDuckGo search for /research
 disk_health.py             Disk-space monitoring (free space < 20% alerts)
 storage/vault_writer.py    sanitized note writing + YAML frontmatter + CATEGORY_MAP
@@ -48,7 +49,8 @@ data/agent.db              SQLite state (dedup + queues) — outside the vault o
 | 📖 E-books: `EPUB · MOBI · AZW/AZW3/AZW4 · DJVU · FB2 · LIT · PDF` | Real chapters detected (EPUB/FB2 TOC, PDF headings) → detailed per-chapter summaries → multi-page study note + the complete book saved as Markdown (background, live progress) |
 | 📧 Email files (`.eml`) | Parsed → knowledge note |
 | 💭 Plain text | Queued → `/text` merges into one structured note |
-| 🗣️ Voice notes / audio | Queued → `/voice` transcribes (free Whisper) into one note; caption `research` = instant deep search |
+| 🎵 Audio files (`mp3/wav/m4a/ogg` sent as documents or voice) | Queued → `/voice` transcribes (free Whisper) into one note; caption `research` = instant deep search |
+| 🖼️ Images / screenshots / albums | LLM vision (text, boxes, bullets, diagrams) + Tesseract OCR fallback → categorized note; albums fused into one note |
 | 🔎 `/research <topic>` | DuckDuckGo → scrape top sources → cited synthesis note |
 
 ### Detail levels (caption or command)
@@ -218,6 +220,7 @@ cd TelegramAgent/bot && docker compose up -d --build
 | `CATEGORY_TAXONOMY_PATH` | `config/category_taxonomy.yaml` | `/organize` rules |
 | `DASHBOARD_DAYS` | `7` | window for the auto-generated `Recent Notes.md` |
 | `X_THREAD_MAX_LINKS` | `3` | max external links followed inside an X/Twitter thread |
+| `VISION_MODEL` | auto-pick (`zai/glm-4v-flash` → Groq llama-vision → OpenRouter qwen-vl) | LLM with image support for photo/album ingestion; falls back to Tesseract OCR |
 | `LOG_DIR` | `logs` | rotating log files |
 
 ---

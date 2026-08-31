@@ -39,6 +39,7 @@ from parsers.audio_parser import (
     transcribe_audio_local,
 )
 from parsers.search_parser import search_web
+from parsers.image_parser import ocr_image, vision_extract
 from parsers.video_parser import (
     download_youtube_audio,
     extract_audio_track,
@@ -287,6 +288,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else context.user_data.get("detail_level", "detailed")
     )
 
+    # --- MIME routing: audio/image files sent as documents go to the right pipeline ---
+    mime = (update.message.document.mime_type or "").lower()
+    if mime.startswith("audio/"):
+        await _queue_document_as_voice(update, context)
+        return
+    if mime.startswith("image/"):
+        status = StatusMessage(await update.message.reply_text("🖼️ Reading image…"))
+        await run_with_deadline(
+            status, _document_image_job(update, context, update.message.document, status)
+        )
+        return
+
     file_obj = await update.message.document.get_file()
     if not file_obj:
         await update.message.reply_text("❌ No valid document received.")
@@ -296,6 +309,65 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_with_deadline(
         status, _document_job(update, file_obj, caption, detail_level, status)
     )
+
+
+async def _queue_document_as_voice(update, context):
+    """Audio files sent as documents join the /voice queue (same as voice notes)."""
+    media = update.message.document
+    caption = (update.message.caption or "").strip()
+    if "research" in caption.lower():
+        status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
+        await run_with_deadline(status, _voice_research_job(update, context, media, status))
+        return
+    chat_id = update.effective_chat.id
+    staging = STAGING_DIR / str(chat_id)
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        file_obj = await media.get_file()
+        local_path = await file_obj.download_to_drive(staging)
+    except Exception as e:
+        logger.error(f"Could not download audio document: {e}")
+        await update.message.reply_text("❌ Could not download the audio. Try again.")
+        return
+    n = await asyncio.to_thread(pending_add, chat_id, "voice", str(local_path))
+    await update.message.reply_text(
+        f"🎙️ Audio queued ({n} in the queue).\n"
+        "Keep sending more, or /voice to transcribe and create the note."
+    )
+
+
+async def _document_image_job(update, context, document, status):
+    """Image sent as a document → download → vision/OCR → note."""
+    with tempfile.TemporaryDirectory() as tmp:
+        file_obj = await document.get_file()
+        local_path = await file_obj.download_to_drive(tmp)
+        fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
+        force = _wants_force(update.message.caption or "")
+        if await _reject_duplicate(update, fingerprint, force):
+            return
+        attachment_rel = _save_attachment(local_path)
+        detail = (
+            derive_detail_level(update.message.caption)
+            if update.message.caption
+            else "detailed"
+        )
+        extracted = await vision_extract([str(local_path)])
+        if not extracted:
+            await status.fail("Could not read any content from this image.")
+            return
+        await status.update("🧠 Interpreting image content…")
+        await analyze_and_save(
+            update,
+            context,
+            extracted,
+            detail,
+            source=f"telegram-image::{Path(local_path).name}",
+            source_type="image",
+            source_kind="image",
+            attachment=attachment_rel,
+            fingerprint=fingerprint,
+            force=force,
+        )
 
 
 async def _document_job(update, file_obj, caption, detail_level, status):
@@ -667,7 +739,7 @@ async def research_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _offer_model_switch(update, context)
     except Exception as e:
         logger.error(f"Research command failed: {e}")
-        pass
+        await status.fail(f"Research failed: {e}")
 
 
 async def _research_topic(update, context, topic, status):
@@ -696,7 +768,16 @@ async def _research_topic(update, context, topic, status):
     payload = "\n\n---\n\n".join(sources_payload)
 
     await status.update("🧠 Synthesizing research…")
-    note_text, _ = await chat(prompt, payload, max_tokens=6000)
+    try:
+        note_text, _ = await chat(prompt, payload, max_tokens=6000)
+    except ProviderRateLimitError as e:
+        logger.error(f"Rate Limit or Quota Exceeded during research: {e}")
+        await status.fail(await _quota_error_text(e))
+        return
+    except AllProvidersFailedError as e:
+        logger.error(f"All providers failed during research: {[a.get('error') for a in e.attempts]}")
+        await status.fail("All AI providers failed — run /models to check.")
+        return
 
     note_dict = _parse_response(note_text)
     if not note_dict:
@@ -774,7 +855,16 @@ async def _youtube_job(update, context, url, video_id, detail, fingerprint, stat
         f"Video URL: {url}\nTitle: {title}\nChannel: {author}\n\n"
         f"Transcript:\n{transcript[:50000]}"
     )
-    note_text, _ = await chat(VIDEO_PROMPT.format(categories=CATEGORIES), payload, max_tokens=6000)
+    try:
+        note_text, _ = await chat(VIDEO_PROMPT.format(categories=CATEGORIES), payload, max_tokens=6000)
+    except ProviderRateLimitError as e:
+        logger.error(f"Rate Limit or Quota Exceeded on video summarization: {e}")
+        await status.fail(await _quota_error_text(e))
+        return
+    except AllProvidersFailedError as e:
+        logger.error(f"All providers failed: {[a.get('error') for a in e.attempts]}")
+        await status.fail("All AI providers failed — run /models to check.")
+        return
     note_dict = _parse_response(note_text)
     if not note_dict:
         await status.fail("Video summarization failed.")
@@ -1305,6 +1395,7 @@ def main():
         app.add_handler(CommandHandler(cmd, set_detail_command))
     app.add_handler(CallbackQueryHandler(model_choice_callback, pattern=r"^swm:\d+$"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(
         MessageHandler(filters.VIDEO | (filters.Document.VIDEO & filters.Document.ALL), handle_video)
@@ -1318,13 +1409,135 @@ def main():
 
 
 async def handle_unsupported(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reply to content types the bot can't process yet (photos, stickers…)."""
+    """Reply to content types the bot can't process yet (stickers, GIFs…)."""
     if update.message and not update.message.text:
         await update.message.reply_text(
             "🤔 I can't process this content type yet.\n"
-            "Supported: documents (PDF/DOCX/XLSX/TXT/JSON/MD/CSV/EML), links, "
+            "Supported: images/albums, documents (PDF/DOCX/XLSX/TXT/JSON/MD/CSV/EML), links, "
             "e-books, voice/audio, video files and video links."
         )
+
+
+# ---- Photo / album ingestion (v1.9) ----
+
+ALBUM_HOLD_SECONDS = 3
+_album_buffers: dict = {}
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Photo/screenshot → LLM vision (extract text+diagrams) → OCR fallback → note."""
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not _check_rate_limit(user_id):
+        await update.message.reply_text(
+            f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between requests."
+        )
+        return
+
+    photos = update.message.photo or []
+    if not photos:
+        await update.message.reply_text("❌ No image received.")
+        return
+    photo = photos[-1]  # largest available size
+
+    media_group_id = update.message.media_group_id
+    if media_group_id:
+        await _buffer_album_photo(update, context, photo, media_group_id)
+        return
+
+    status = StatusMessage(await update.message.reply_text("🖼️ Reading image…"))
+    await run_with_deadline(
+        status,
+        _photo_job(update, context, [update.message], status),
+    )
+
+
+async def _buffer_album_photo(update, context, photo, media_group_id):
+    """Collect album photos; process the whole group after a short hold."""
+    buf = _album_buffers.setdefault(
+        media_group_id,
+        {"messages": [], "caption": "", "task": None, "context": context},
+    )
+    buf["messages"].append(update.message)
+    if update.message.caption:
+        buf["caption"] = update.message.caption
+    if buf["task"] is None or buf["task"].done():
+        buf["task"] = asyncio.create_task(_process_album(media_group_id))
+
+
+async def _process_album(media_group_id):
+    await asyncio.sleep(ALBUM_HOLD_SECONDS)
+    buf = _album_buffers.pop(media_group_id, None)
+    if not buf or not buf["messages"]:
+        _album_buffers.pop(media_group_id, None)
+        return
+    update = buf["messages"][0]
+    status = StatusMessage(
+        await update.effective_chat.send_message(
+            f"🖼️ Reading album ({len(buf['messages'])} images)…"
+        )
+    )
+    try:
+        await run_with_deadline(
+            status,
+            _photo_job(update, buf.get("context"), buf["messages"], status, caption=buf["caption"]),
+        )
+    finally:
+        _album_buffers.pop(media_group_id, None)
+
+
+async def _photo_job(update, context, messages, status, caption: str = ""):
+    """Download N photos → fingerprint → vision/OCR extraction → analyze_and_save."""
+    with tempfile.TemporaryDirectory() as tmp:
+        paths: list = []
+        for i, msg in enumerate(messages, 1):
+            photo = msg.photo[-1] if msg.photo else None
+            if photo is None:
+                continue
+            file_obj = await photo.get_file()
+            p = await file_obj.download_to_drive(tmp)
+            paths.append(str(p))
+        if not paths:
+            await status.fail("No image data received.")
+            return
+
+        # Combined fingerprint so re-sending the same album is deduped.
+        fps = [
+            await asyncio.to_thread(compute_file_fingerprint, p) for p in paths
+        ]
+        fingerprint = (
+            fps[0]
+            if len(fps) == 1
+            else f"image-album::{hashlib.sha256(','.join(fps).encode()).hexdigest()}"
+        )
+        if not caption and messages:
+            caption = messages[0].caption or ""
+        force = _wants_force(caption)
+        if await _reject_duplicate(update, fingerprint, force):
+            return
+
+        attachment_rel = _save_attachment(paths[0]) if len(paths) == 1 else None
+        detail = derive_detail_level(caption) if caption else "detailed"
+
+        extracted = await vision_extract(paths)
+        if not extracted:
+            await status.fail("Could not read any content from these images.")
+            return
+        source_name = Path(paths[0]).name
+        source_label = "photograph" if len(paths) == 1 else f"album of {len(paths)} photos"
+
+    await status.update("🧠 Interpreting image content…")
+    await analyze_and_save(
+        update,
+        context,
+        extracted,
+        detail,
+        source=f"telegram-{source_label}::{source_name}",
+        source_type="image",
+        source_kind="image",
+        attachment=attachment_rel,
+        fingerprint=fingerprint,
+        force=force,
+    )
 
 
 if __name__ == "__main__":

@@ -377,6 +377,67 @@ async def litellm_acompletion(
         }
     return content, usage_dict
 
+
+# Vision-capable models per provider (free tiers). The first with credentials wins;
+# then VISION_MODEL env overrides the pick entirely.
+_VISION_BY_PROVIDER = (
+    ("zai", "zai/glm-4v-flash"),             # Zhipu Z.AI — free GLM-4V
+    ("groq", "groq/llama-3.2-90b-vision-preview"),
+    ("openrouter", "openrouter/qwen/qwen-2.5-vl-7b-instruct:free"),
+)
+
+
+def default_vision_model() -> str:
+    """Pick a vision model for an available provider (or VISION_MODEL override)."""
+    override = os.getenv("VISION_MODEL", "").strip()
+    if override:
+        return override
+    for prefix, model in _VISION_BY_PROVIDER:
+        if _provider_ready(prefix):
+            return model
+    return _VISION_BY_PROVIDER[0][1]  # last resort — will fail if no key
+
+
+async def chat_vision(
+    system_prompt: str,
+    user_content: str,
+    image_data_uris: List[str],
+    max_tokens: int = 4096,
+) -> Optional[tuple]:
+    """Vision completion: text + one or more base64 data-URI images via litellm.
+
+    Uses VISION_MODEL (or auto-picked free vision model). Returns
+    ``(text, {"model": ...})`` on success, ``None`` on any failure (no key,
+    provider error, empty response). Callers fall back to OCR.
+    """
+    import litellm
+
+    model = default_vision_model()
+    content: List[Dict[str, Any]] = [{"type": "text", "text": user_content}]
+    for uri in image_data_uris:
+        content.append({"type": "image_url", "image_url": {"url": uri}})
+
+    try:
+        response = await litellm.acompletion(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.2,
+            max_tokens=max_tokens,
+            num_retries=0,
+            timeout=120,
+        )
+        text = (response.choices[0].message.content or "").strip()
+        if not text:
+            logger.warning("Vision model '%s' returned empty content", model)
+            return None
+        return text, {"model": model}
+    except Exception as e:
+        logger.error("Vision completion failed on '%s': %s", model, e)
+        return None
+
 def _set_catalog(catalog: Dict[str, List[str]]) -> None:
     cfg = _load_config()
     cfg["models_catalog"] = catalog

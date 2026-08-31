@@ -5,7 +5,7 @@
 > **Turn Telegram into your personal knowledge capture pipeline.** Send documents, links, and e-books to a bot — get clean, AI-categorized Markdown notes in your Obsidian vault, synced across all your devices.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v1.8.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
+[![Release](https://img.shields.io/badge/release-v1.9.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4.svg?logo=telegram&logoColor=white)](https://telegram.org/)
@@ -46,6 +46,7 @@ You → Telegram → 🧠 AI → Obsidian Vault → all your devices
 | 💭 | **Plain text thoughts** | Queued safely, then `/text` merges them into one structured, categorized note |
 | 🗣️ | Voice notes (`.ogg` / audio files) | Queued, then `/voice` transcribes (free Whisper) into one note · caption `research` = instant deep search |
 | 🎥 | Uploaded video files (≤20MB) | ffmpeg extracts audio → Whisper transcript → summary note |
+| 🖼️ | **Images / screenshots / albums** | LLM vision (extract text, boxes, bullets, diagrams) with **Tesseract OCR fallback** native to the server → categorized note; multi-photo albums fused into **one** note |
 
 ### 🎚️ Detail levels — you control the depth
 
@@ -201,6 +202,30 @@ optional `YOUTUBE_PROXY_URL`.
 **How it works:** `ffmpeg` extracts the audio track (`extract_audio_track`), then the same
 split → transcribe → re-join pipeline as YouTube Layer 3 runs. You get a full transcript
 note regardless of the video's length.
+
+### 🖼️ Images & screenshots (v1.9)
+
+**Use:** send any photo, screenshot or a whole **album** (multiple photos in one message) —
+optionally with a caption detail level (e.g. `/detailed`). All images in an album are
+fused into **one** note. Images attached as *documents* (e.g. `.png` sent via "Attach")
+are routed here automatically by MIME type.
+
+**How it works:** `parsers/image_parser.py` + `handle_photo`/`_photo_job` in `bot.py`:
+1. Each photo downloads to a temp dir; an **album fingerprint** (SHA-256 of the per-image
+   hashes) enables duplicate detection for the whole group.
+2. Pillow normalizes every image — RGB, downscale to ≤1600 px, JPEG q85 (keeps tokens cheap).
+3. **LLM vision** (`llm.provider.chat_vision`) sends the images as base64 data-URIs to
+   `VISION_MODEL` — auto-picked free model by provider: `zai/glm-4v-flash` (Z.AI) →
+   `groq/llama-3.2-90b-vision-preview` → `openrouter/qwen-2.5-vl-7b:free` — with a prompt
+   that transcribes **every** piece of text (boxes, bullet lists, diagrams) plus a short
+   description of the inferred relationships.
+4. **Fallback:** if the vision LLM fails or has no key, **Tesseract OCR**
+   (`pytesseract`, installed in the Docker image, 0 tokens) extracts the text locally.
+5. The extracted text goes through the normal `analyze_and_save` pipeline → categorized
+   note with `source_type: image`; the original image is also copied to
+   `90_Attachments/` and linked from the note.
+
+**Config:** `VISION_MODEL` (optional override) in `.env`.
 
 ### 🗣️ Voice notes & audio · 💭 Plain-text thoughts
 
@@ -367,8 +392,9 @@ or when quota runs out — no unsolicited check messages.
 - [x] v1.6 — `/organize` concentration: keyword-based merges into broad categories, recursive note counting, sub-category folders preserved · model checks only on request or quota exhaustion (no unsolicited messages) · `/organize` in `/help`
 - [x] v1.7 — `/dashboard`: auto-generated `Recent Notes.md` in the vault (newest notes per category, plain wikilinks — no plugin needed) · silent weekly refresh · `DASHBOARD_DAYS` window
 - [x] v1.8 — X/Twitter threads: author self-replies + author's posted links fetched via free fxtwitter API and merged into one note (single-tweet X links also render cleanly now)
+- [x] v1.8.1 — Zhipu fallback fixed: `zai/` provider prefix (litellm 1.83 rebrand) so GLM-4-Flash free tier is actually reachable; accepts `ZHIPU_API_KEY` or `ZAI_API_KEY`
+- [x] v1.9 — Image & album ingestion: LLM vision (free `zai/glm-4v-flash` / Groq llama-vision / OpenRouter qwen-vl) with Tesseract OCR fallback; album fusion into one note; audio/* documents routed to `/voice`; `/research` & video summarization never fail silently (quota/rate-limit errors surface with the exact provider message)
 - [ ] Semantic search over the vault (`/search <query>`)
-- [ ] Photo/screenshot OCR ingestion
 - [ ] Weekly review notes
 
 ---
