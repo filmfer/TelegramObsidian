@@ -38,6 +38,7 @@ You → Telegram → 🧠 AI → Obsidian Vault → all your devices
 | | Input | What happens |
 |---|---|---|
 | 📄 | PDF · DOCX · XLSX · TXT · MD · JSON · CSV | Full-text extraction → knowledge note |
+| 🧵 | X.com / Twitter threads | Author's self-reply thread ("1/ 2/ 3/…") + external links the author posted — fetched and merged into **one** categorized note (free fxtwitter API, no X API key) |
 | 🔗 | Any web link | 3-layer scraping chain (headers → cloudscraper → jina.ai), SSRF-safe |
 | 🎬 | YouTube / video links | 3-tier fallback chain (captions → yt-dlp subtitles → local faster-whisper/Groq audio; up to 1h30+ free) → summary note with video info & thumbnail |
 | 📖 | E-books: EPUB · MOBI · AZW·AZW3·AZW4 · DJVU · FB2 · LIT | Title / author / year + multi-page study note with **chapter-by-chapter summaries** and the complete book converted to Markdown, linked from the note |
@@ -206,6 +207,7 @@ or when quota runs out — no unsolicited check messages.
 - [x] v1.3 — YouTube 3-layer fallback (up to 1h30+ free with yt-dlp & faster-whisper) · Disk-space monitoring (`/disk` + 6h proactive alerts) · Resilient `/organize` · rclone VFS cache auto-heals
 - [x] v1.6 — `/organize` concentration: keyword-based merges into broad categories, recursive note counting, sub-category folders preserved · model checks only on request or quota exhaustion (no unsolicited messages) · `/organize` in `/help`
 - [x] v1.7 — `/dashboard`: auto-generated `Recent Notes.md` in the vault (newest notes per category, plain wikilinks — no plugin needed) · silent weekly refresh · `DASHBOARD_DAYS` window
+- [x] v1.8 — X/Twitter threads: author self-replies + author's posted links fetched via free fxtwitter API and merged into one note (single-tweet X links also render cleanly now)
 - [ ] Semantic search over the vault (`/search <query>`)
 - [ ] Photo/screenshot OCR ingestion
 - [ ] Weekly review notes

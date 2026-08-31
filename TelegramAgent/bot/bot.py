@@ -22,6 +22,7 @@ from telegram.ext import (
 
 from parsers.document_parser import parse_document
 from parsers.link_parser import parse_link, parse_link_with_meta, download_thumbnail
+from parsers.x_thread import fetch_x_thread, is_x_url
 from parsers.book_parser import (
     book_to_markdown,
     clean_book_text,
@@ -546,7 +547,19 @@ async def organize_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _link_job(update, context, url, status):
     """Scrape a public URL and turn it into a knowledge note (under deadline)."""
-    content, og_image = await parse_link_with_meta(url)
+    content, og_image = None, None
+    source_type = "link"
+    # X/Twitter first: fxtwitter thread (author self-replies + author's links)
+    if is_x_url(url):
+        try:
+            content, og_image = await fetch_x_thread(url)
+            if content:
+                source_type = "x-thread"
+        except Exception as e:
+            logger.warning(f"X thread fetch failed for {url}: {e} — generic scrape fallback")
+            content, og_image = None, None
+    if not content:
+        content, og_image = await parse_link_with_meta(url)
     if not content:
         await status.fail(
             "Could not read the link (it may block bots).\n"
@@ -559,7 +572,7 @@ async def _link_job(update, context, url, status):
     detail = context.user_data.get("detail_level") or "summarize"
     await analyze_and_save(
         update, context, content, detail,
-        source=url, source_type="link", source_kind="document",
+        source=url, source_type=source_type, source_kind="document",
         fingerprint=compute_url_fingerprint(url),
         force=_wants_force(url),
         thumbnail=thumb_rel,

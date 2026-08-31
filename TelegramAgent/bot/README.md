@@ -42,6 +42,7 @@ data/agent.db              SQLite state (dedup + queues) — outside the vault o
 |---|---|
 | 📄 Documents: `PDF · DOCX · XLSX · TXT · MD · JSON · CSV · EML` | Full-text extraction → knowledge note |
 | 🔗 Links (`https://…`) | 3-layer scraping chain, SSRF-safe, `og:image` thumbnail |
+| 🧵 X/Twitter threads | Free fxtwitter API → author self-reply thread **+ author's external links fetched and merged** → one note (fallback: generic chain) |
 | 🎬 YouTube / video links | Caption transcript → summary note with video info + thumbnail |
 | 🎥 Uploaded videos (≤20MB) | ffmpeg extracts audio → Whisper → summary note |
 | 📖 E-books: `EPUB · MOBI · AZW/AZW3/AZW4 · DJVU · FB2 · LIT · PDF` | Real chapters detected (EPUB/FB2 TOC, PDF headings) → detailed per-chapter summaries → multi-page study note + the complete book saved as Markdown (background, live progress) |
@@ -216,6 +217,7 @@ cd TelegramAgent/bot && docker compose up -d --build
 | `STAGING_DIR` | `data/staging` | queued audio staging area |
 | `CATEGORY_TAXONOMY_PATH` | `config/category_taxonomy.yaml` | `/organize` rules |
 | `DASHBOARD_DAYS` | `7` | window for the auto-generated `Recent Notes.md` |
+| `X_THREAD_MAX_LINKS` | `3` | max external links followed inside an X/Twitter thread |
 | `LOG_DIR` | `logs` | rotating log files |
 
 ---
