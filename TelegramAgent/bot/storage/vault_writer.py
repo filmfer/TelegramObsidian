@@ -67,6 +67,8 @@ def derive_detail_level(caption: Optional[str]) -> str:
         return "raw"
     if "book" in cl:
         return "book"
+    if "handwritten" in cl or "manuscrit" in cl or "escrito à mão" in cl or "à mão" in cl or "letra" in cl:
+        return "handwritten"
     return DEFAULT_DETAIL
 
 

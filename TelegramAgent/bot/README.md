@@ -25,6 +25,7 @@ parsers/book_parser.py     e-book metadata + text (PDF/EPUB/MOBI/AZW/AZW3/AZW4/D
 parsers/audio_parser.py    Groq Whisper transcription
 parsers/video_parser.py    YouTube metadata/transcript; uploaded video → ffmpeg audio
 parsers/image_parser.py    image/album ingestion → LLM vision (VISION_MODEL) → Tesseract OCR fallback
+parsers/handwriting_parser.py  handwritten notes (pt-PT) verbatim via vision LLM; few-shot /learn refs; OCR fallback ⚠️ dev
 parsers/search_parser.py   DuckDuckGo search for /research
 disk_health.py             Disk-space monitoring (free space < 20% alerts)
 storage/vault_writer.py    sanitized note writing + YAML frontmatter + CATEGORY_MAP
@@ -221,6 +222,11 @@ cd TelegramAgent/bot && docker compose up -d --build
 | `DASHBOARD_DAYS` | `7` | window for the auto-generated `Recent Notes.md` |
 | `X_THREAD_MAX_LINKS` | `3` | max external links followed inside an X/Twitter thread |
 | `VISION_MODEL` | auto-pick (`zai/glm-4v-flash` → Groq llama-vision → OpenRouter qwen-vl) | LLM with image support for photo/album ingestion; falls back to Tesseract OCR |
+| `HANDWRITTEN_LANG` | `pt-PT` | language hint for handwritten transcription ⚠️ dev |
+| `OCR_LANG` | `por` | Tesseract language for the handwriting OCR fallback |
+| `HANDWRITING_REF_DIR` | `data/handwriting_ref` | `/learn` few-shot samples (persist in the Docker volume) |
+| `HANDWRITING_REF_MAX` | `3` | reference samples injected in each handwriting prompt |
+| `HANDWRITING_DEV_MODE` | `true` | ⚠️ handwritten feature under development |
 | `LOG_DIR` | `logs` | rotating log files |
 
 ---
@@ -236,6 +242,7 @@ cd TelegramAgent/bot && docker compose up -d --build
 | `/organize` finds no candidates | All folders are at/above `threshold` or protected — tune `config/category_taxonomy.yaml`. |
 | Voice note gets no answer | Check `GROQ_API_KEY` (Whisper); transcription errors are always reported. |
 | `/disk` | Manual disk report. Proactive alert + inline note warning when free space < `DISK_WARN_THRESHOLD_PCT`%. |
+| Handwritten note transcribed poorly ⚠️ | Feature under development. Retrain with `/learn` (photo → correct text); each sample improves future transcriptions. Illegible words appear as `[?]`. |
 | rclone mount down | `systemctl status rclone-gdrive --no-pager` · `sudo rclone lsd gdrive:` |
 
 ---

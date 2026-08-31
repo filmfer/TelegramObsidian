@@ -40,6 +40,10 @@ from parsers.audio_parser import (
 )
 from parsers.search_parser import search_web
 from parsers.image_parser import ocr_image, vision_extract
+from parsers.handwriting_parser import (
+    save_handwriting_reference,
+    transcribe_handwritten,
+)
 from parsers.video_parser import (
     download_youtube_audio,
     extract_audio_track,
@@ -125,7 +129,7 @@ THUMBNAILS_DIR = Path(VAULT_PATH, "90_Attachments", "thumbnails")
 THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
 init_db()  # dedup + pending-queue SQLite store (data/agent.db)
 
-DETAIL_LEVELS = {"summarize", "detailed", "precise", "raw", "book"}
+DETAIL_LEVELS = {"summarize", "detailed", "precise", "raw", "book", "handwritten"}
 # Book pipeline tuning
 BOOK_MAX_CHAPTERS = int(os.getenv("BOOK_MAX_CHAPTERS", "60"))
 BOOK_FULLTEXT = os.getenv("BOOK_FULLTEXT", "true").strip().lower() in ("1", "true", "yes")
@@ -433,6 +437,35 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
 
+    # --- /learn two-step: photo with /learn, then plain text = reference ---
+    if context.user_data.get("_hw_pending_ref"):
+        img_path = context.user_data.pop("_hw_pending_ref", None)
+        token = context.user_data.pop("_hw_pending_token", None)
+        try:
+            saved = await asyncio.to_thread(
+                save_handwriting_reference, img_path, text
+            )
+        except Exception as e:
+            logger.error("Could not save handwriting reference: %s", e)
+            await update.message.reply_text(
+                "❌ Could not save the reference. Try /learn again."
+            )
+            return
+        # clean up temp image regardless
+        import os as _os
+
+        if img_path and _os.path.isfile(img_path):
+            try:
+                _os.remove(img_path)
+            except Exception:
+                pass
+        await update.message.reply_text(
+            f"✅ Handwriting sample saved! The bot will use your handwriting\n"
+            f"to transcribe future notes more accurately ({saved.name}).\n"
+            "Send future notes with caption 'handwritten' (or /handwritten)."
+        )
+        return
+
     if text.startswith(("http://", "https://")):
         if is_youtube_url(text):
             await _process_youtube(update, context, text)
@@ -446,6 +479,38 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📝 Text queued ({n} in the queue).\n"
         "Keep sending messages to accumulate, or /text to create the note now."
+    )
+
+
+async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Two-step handwriting trainer: /learn (with photo) → text with correct transcript."""
+    photo = None
+    if update.message and update.message.photo:
+        photo = update.message.photo[-1]
+    caption = (update.message.caption or "").strip() if update.message else ""
+    if not photo:
+        await update.message.reply_text(
+            "✍️ To teach me your handwriting, send a PHOTO of a handwritten note "
+            "with the caption /learn.\n"
+            "Then, in the NEXT message, write the correct verbatim text.\n"
+            "I'll use it to recognize your writing better on future notes."
+        )
+        return
+    # Save the photo to staging for the upcoming text step
+    staging = STAGING_DIR / "hw_learn"
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        file_obj = await photo.get_file()
+        hw_path = await file_obj.download_to_drive(staging)
+    except Exception as e:
+        logger.error(f"/learn photo download failed: {e}")
+        await update.message.reply_text("❌ Could not download the photo. Try again.")
+        return
+    context.user_data["_hw_pending_ref"] = str(hw_path)
+    await update.message.reply_text(
+        "✅ Photo received. Now send the CORRECT verbatim text of this note "
+        "as your next message (no command).\n"
+        "I'll store it as a handwriting reference sample."
     )
 
 
@@ -1391,8 +1456,9 @@ def main():
     app.add_handler(CommandHandler("organize", organize_command))
     app.add_handler(CommandHandler("dashboard", dashboard_command))
     app.add_handler(CallbackQueryHandler(organize_callback, pattern=r"^org:(yes|no)$"))
-    for cmd in ("summarize", "detailed", "precise", "raw", "book"):
+    for cmd in ("summarize", "detailed", "precise", "raw", "book", "handwritten"):
         app.add_handler(CommandHandler(cmd, set_detail_command))
+    app.add_handler(CommandHandler("learn", learn_command))
     app.add_handler(CallbackQueryHandler(model_choice_callback, pattern=r"^swm:\d+$"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
@@ -1518,6 +1584,11 @@ async def _photo_job(update, context, messages, status, caption: str = ""):
         attachment_rel = _save_attachment(paths[0]) if len(paths) == 1 else None
         detail = derive_detail_level(caption) if caption else "detailed"
 
+        # --- HANDWRITTEN route (v1.10, DEV): verbatim transcription, no summarization ---
+        if detail == "handwritten":
+            await _handwritten_job(update, context, paths, status, fingerprint, force)
+            return
+
         extracted = await vision_extract(paths)
         if not extracted:
             await status.fail("Could not read any content from these images.")
@@ -1537,6 +1608,53 @@ async def _photo_job(update, context, messages, status, caption: str = ""):
         attachment=attachment_rel,
         fingerprint=fingerprint,
         force=force,
+    )
+
+
+async def _handwritten_job(update, context, paths, status, fingerprint, force):
+    """Handwritten photos → verbatim transcription (pt-PT) → direct note, no summarization."""
+    await status.update("✍️ Transcribing handwritten note (pt-PT)…")
+    try:
+        text = await transcribe_handwritten(paths)
+    except Exception as e:
+        logger.error(f"Handwritten transcription failed: {e}")
+        await status.fail(f"Handwritten transcription failed: {e}")
+        return
+    if not text:
+        await status.fail("Could not read the handwriting. Ensure the photo is well lit.")
+        return
+
+    # Reuse the META_JSON parser: the model outputs body + META_JSON line.
+    note_dict = _parse_response(text)
+    body = note_dict.get("content") or text if note_dict else text
+    # Strip any META_JSON remnants from body display
+    import re as _re
+
+    if body:
+        body = _re.sub(r"\n?META_JSON:\s*\{.*\}\s*$", "", body, flags=_re.S).strip()
+    if not note_dict:
+        note_dict = {
+            "title": "Handwritten Note",
+            "category": "uncategorized",
+            "tags": ["handwritten"],
+        }
+    note_dict.update(
+        {
+            "content": body or note_dict.get("content", text),
+            "source": f"telegram-handwritten::{Path(paths[0]).name}",
+            "source_type": "handwritten",
+            "detail_level": "handwritten",
+            "tags": list(dict.fromkeys(["handwritten"] + note_dict.get("tags", []))),
+        }
+    )
+    note_path = write_note_to_vault(note_dict)
+    if not note_path:
+        await status.fail("Could not write to Obsidian vault.")
+        return
+    await arecord_processed(fingerprint, "handwritten", note_dict["source"], note_path)
+    await status.update(
+        f"✍️ Handwritten note saved!\n📂 {note_path}\n📝 {note_dict.get('title')}\n\n"
+        "⚠️ Feature in development — verify the transcription made sense."
     )
 
 

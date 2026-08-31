@@ -59,6 +59,8 @@ Send with a caption or `/command`:
 | `/precise` | Exact data extraction — every number preserved |
 | `/raw` | Verbatim text, metadata only |
 | `/book` | Book mode: title, author(s), year + chapter summaries + full-text Markdown (background) |
+| `/handwritten` ⚠️ | Handwritten photo → **verbatim** transcription (pt-PT), title + categories only — content untouched *(under development)* |
+| `/learn` ⚠️ | Teach the bot your handwriting: photo + correct text → used as few-shot reference *(under development)* |
 | `/dashboard` | Rebuilds `Recent Notes.md` in the vault — newest notes per category (weekly silent refresh) |
 
 ### ⌨️ Commands
@@ -227,6 +229,46 @@ are routed here automatically by MIME type.
 
 **Config:** `VISION_MODEL` (optional override) in `.env`.
 
+### ✍️ Handwritten notes — pt-PT (v1.10, ⚠️ UNDER DEVELOPMENT)
+
+> **Warning:** this feature is still in development — accuracy depends heavily on
+> handwriting legibility. Expect some errors; the bot marks illegible words as `[?]`
+> rather than guessing. Improve recognition by training it with `/learn`.
+
+**Use:** send a photo of a handwritten note (or an album) with the caption
+`handwritten`, `manuscrito`, "escrito à mão" or `/handwritten`. The bot extracts the
+text **exactly as written** — it does not correct, rephrase, summarize or add anything.
+Only the note title and categories are derived from the content. The original photo is
+copied to `90_Attachments/`.
+
+**How it works:** `parsers/handwriting_parser.py` + `_handwritten_job` in `bot.py`:
+1. Photos → base64 data-URIs → **vision LLM** (`VISION_MODEL` free chain:
+   `zai/glm-4v-flash` → Groq llama-vision → OpenRouter qwen-vl) with a strict
+   **verbatim pt-PT prompt**: preserve spelling, accents, line breaks, bullets, dates,
+   prices, names; illegible words become `[?]`.
+2. The model appends one `META_JSON:` line (title / category / categories / tags) —
+   parsed and stripped, so the body stays untouched (pass-through to
+   `write_note_to_vault`, `source_type: handwritten`).
+3. **Fallback:** Tesseract OCR with `lang=por` (offline, zero tokens) when no vision
+   model is reachable. Weak on cursive — hence the LLM being primary.
+
+**Teaching it your handwriting (`/learn`):** two steps —
+1. send a photo of a handwritten note with caption `/learn`;
+2. in the next message, type the correct verbatim text.
+The pair (image, transcript) is stored in `HANDWRITING_REF_DIR` (default
+`data/handwriting_ref/`, persisted in the Docker volume) and up to
+`HANDWRITING_REF_MAX` recent samples are injected into every future transcription
+prompt as **few-shot examples** — the model uses your own hand to disambiguate words.
+Repeat whenever you spot an error: each correction refines future notes.
+
+**Honest limits:** no free offline tool *truly* learns a personal handwriting style.
+Few-shot prompting is the strongest free technique and works well for consistent
+hands; a future paid upgrade (vision fine-tuning using the same reference folder as
+a dataset) is architecturally compatible — no rewrite needed.
+
+**Config:** `HANDWRITTEN_LANG=pt-PT` · `OCR_LANG=por` · `HANDWRITING_REF_DIR` ·
+`HANDWRITING_REF_MAX=3` · `HANDWRITING_DEV_MODE=true`
+
 ### 🗣️ Voice notes & audio · 💭 Plain-text thoughts
 
 **Use:** send voice messages or audio files — they queue silently; run `/voice` to
@@ -394,6 +436,7 @@ or when quota runs out — no unsolicited check messages.
 - [x] v1.8 — X/Twitter threads: author self-replies + author's posted links fetched via free fxtwitter API and merged into one note (single-tweet X links also render cleanly now)
 - [x] v1.8.1 — Zhipu fallback fixed: `zai/` provider prefix (litellm 1.83 rebrand) so GLM-4-Flash free tier is actually reachable; accepts `ZHIPU_API_KEY` or `ZAI_API_KEY`
 - [x] v1.9 — Image & album ingestion: LLM vision (free `zai/glm-4v-flash` / Groq llama-vision / OpenRouter qwen-vl) with Tesseract OCR fallback; album fusion into one note; audio/* documents routed to `/voice`; `/research` & video summarization never fail silently (quota/rate-limit errors surface with the exact provider message)
+- [ ] v1.10 (in development) — Handwritten notes (pt-PT): verbatim transcription via vision LLM + Tesseract-por fallback, `[?]` for illegible words, `/learn` few-shot training loop that adapts to the user's handwriting
 - [ ] Semantic search over the vault (`/search <query>`)
 - [ ] Weekly review notes
 
