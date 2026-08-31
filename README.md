@@ -5,7 +5,7 @@
 > **Turn Telegram into your personal knowledge capture pipeline.** Send documents, links, and e-books to a bot — get clean, AI-categorized Markdown notes in your Obsidian vault, synced across all your devices.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v1.3.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
+[![Release](https://img.shields.io/badge/release-v1.8.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4.svg?logo=telegram&logoColor=white)](https://telegram.org/)
@@ -105,6 +105,165 @@ conflicts *detectable* instead of silently destructive:
 | 🖥️ Windows PCs | Google Drive for Desktop |
 | 📱 Android | DriveSync / FolderSync |
 | 🔁 Versioning | Obsidian Git plugin |
+
+---
+
+## 🛠️ How every tool works — usage + technical details
+
+Each tool below: **how to use it** (what you send) and **how it works** (the technical pipeline behind it).
+
+### 📄 Documents (PDF · DOCX · XLSX · TXT · MD · JSON · CSV · EML)
+
+**Use:** send the file to the bot (caption = optional detail level, e.g. `detailed`).
+
+**How it works:** `parsers/document_parser.py` picks the right extractor per format — `pypdf`
+(PDF), `python-docx` (DOCX), `openpyxl` (XLSX, all sheets), raw text (TXT/MD/JSON/CSV),
+`defusedxml` + email parser (`.eml`). The extracted text is validated (non-empty, size-capped),
+sent to the LLM with a detail-level prompt, and written as a note with YAML frontmatter
+(title, category, tags, source, date) by `vault_writer.py`.
+
+### 📖 E-books — `/book`
+
+**Use:** send an EPUB/PDF/MOBI/… file with caption `/book` (or any e-book is auto-detected).
+Processing runs in the background with live progress; expect several minutes.
+
+**How it works:** `parsers/book_parser.py` detects **real chapters** — EPUB/FB2 via spine/TOC
+structure, PDF via "Chapter N / Capítulo N" heading detection (fallback: 30-page blocks) —
+then the pipeline runs:
+1. **Map** — one LLM call per chapter: Overview · Key Concepts · Important Details ·
+   Actionable Lessons (up to ~1200 words each), sequential with rate-limit-friendly pacing.
+2. **Synthesize** — a cheap call over chapter *digests* (300 chars each) writes Synopsis,
+   Core Ideas, Practical Takeaways.
+3. **Assemble locally** — the note is built in memory (no giant merge call → **nothing is
+   truncated**, even for 1000-page books).
+4. **Full text** — the complete book is converted to Markdown
+   (`90_Attachments/BookTexts/<Title>.md`) and wikilinked from the note for graph integration.
+
+Config: `BOOK_MAX_CHAPTERS` (overflow chapters merged), `BOOK_FULLTEXT` (on/off).
+
+### 🔗 Any web link
+
+**Use:** paste a URL (caption = detail level).
+
+**How it works:** `parsers/link_parser.py` tries three layers until text comes out:
+① `httpx` with browser headers → trafilatura extraction; ② `cloudscraper`
+(Cloudflare-protected sites); ③ **Jina Reader** (`r.jina.ai`) — renders JavaScript and
+returns Markdown. Every fetch is SSRF-safe: hostnames resolving to private/reserved
+IP ranges are blocked before any request. The page's `og:image` is downloaded as a
+thumbnail embedded at the top of the note.
+
+### 🧵 X.com / Twitter threads
+
+**Use:** paste any `x.com`/`twitter.com` status link (thread or single tweet).
+
+**How it works:** X's official API is pay-walled, so `parsers/x_thread.py` uses the **free
+fxtwitter API** (`api.fxtwitter.com/i/status/<id>` — JSON, no key, browser User-Agent
+required to pass its bot filter):
+1. **Thread detection** — the response's `thread` field lists the author's **self-replies**
+   (the "1/ 2/ 3/…" continuation pattern). Replies from *other* users are filtered out by
+   author id (they're commentary, not content).
+2. **Author's external links** — URLs posted inside the tweet or self-replies are extracted,
+   de-duplicated, and each is fetched with the generic 3-layer scraper, abridged to 4000
+   chars, and appended as a **🔗 Linked resources** section (cap: `X_THREAD_MAX_LINKS`, default 3).
+3. **One note** — tweet + all thread parts + linked resources are merged into a single
+   Markdown document → one categorized note (`source_type: x-thread`). The first media
+   attachment becomes the thumbnail.
+4. **Fallback** — if fxtwitter is down or the tweet is protected, the generic scraper chain
+   takes over; failure never blocks the note flow.
+
+### 🎬 YouTube links — up to 2h, free
+
+**Use:** paste any YouTube URL (caption = detail level).
+
+**How it works:** `parsers/video_parser.py` runs a 3-layer fallback to get the transcript —
+*never transcribing audio when captions exist* (instant + free, no duration limit):
+1. **Layer 1 — caption API**: `youtube-transcript-api` fetches the video's own captions.
+   On datacenter IPs (VPS) YouTube often blocks this — that's what layers 2/3 solve.
+2. **Layer 2 — yt-dlp subtitles**: `yt-dlp` (different request path, works past the block)
+   downloads existing subtitles or auto-captions (`writesubtitles` + `writeautomaticsub`,
+   `skip_download=True`); timestamps/tags are stripped from the `.vtt`/`.srt`.
+3. **Layer 3 — audio transcription** (only when *no* captions exist): the audio track is
+   downloaded, then `ffprobe` measures its duration and **`ffmpeg` splits it into ~15-min
+   segments** (48 kbps mono ≈ 5 MB each — under Groq's 25 MB cap). Each segment is
+   transcribed (Groq Whisper; `faster-whisper` locally as free fallback) and all chunks are
+   re-joined with `[00:00–15:00]` style timestamps → one full transcript → one note.
+   This is how **1h30+ videos work at zero cost**.
+Video metadata + thumbnail are embedded in the note. Progress is edited live into the
+Telegram message (`✂️ Splitting audio…` → `🎙️ Transcribing segment 3/N…`).
+
+Config: `AUDIO_MAX_GROQ_MB=24`, `AUDIO_SEGMENT_SECONDS=900`, `WHISPER_MODEL`,
+optional `YOUTUBE_PROXY_URL`.
+
+### 🎥 Uploaded video files (≤20 MB)
+
+**Use:** send the video file (Telegram caps downloads at 20 MB for bots).
+
+**How it works:** `ffmpeg` extracts the audio track (`extract_audio_track`), then the same
+split → transcribe → re-join pipeline as YouTube Layer 3 runs. You get a full transcript
+note regardless of the video's length.
+
+### 🗣️ Voice notes & audio · 💭 Plain-text thoughts
+
+**Use:** send voice messages or audio files — they queue silently; run `/voice` to
+transcribe them all into **one** note. Send text thoughts — queue them, run `/text` to
+merge into one structured note. `/queue` shows what's waiting (items expire after
+`PENDING_QUEUE_TTL_HOURS`, default 24h). Caption `research` on a voice note = instant
+deep search on the transcript.
+
+**How it works:** queues persist in SQLite (survive restarts). Transcription uses Groq's
+free `whisper-large-v3` (300 s timeout); oversized audio (> `AUDIO_MAX_GROQ_MB`) goes
+through the same ffmpeg segmentation as YouTube Layer 3, and `faster-whisper` (CPU, int8)
+is the final local fallback — the pipeline always ends in a note.
+
+### 🔎 `/research <topic>`
+
+**Use:** `/research rust async runtime` — get a cited synthesis note.
+
+**How it works:** DuckDuckGo search → top results scraped with the 3-layer chain →
+each source summarized → merged into one note with a **Sources** section (title + URL
+per citation), under the same 10-minute deadline as every other job.
+
+### 🧹 `/organize` & `/organize preview`
+
+**Use:** `/organize preview` (see the plan, touch nothing) → `/organize` (shows an
+Apply/Cancel keyboard).
+
+**How it works:** `storage/vault_organizer.py` scans category folders **recursively**
+(`rglob`) so notes in sub-folders still count. Folders with ≥ `threshold` notes (default 3)
+are "keepers" (biggest first); sparse folders are matched to broad categories via
+`config/category_taxonomy.yaml`: `manual:` mappings first, then `keyword:` rules
+(e.g. `LLM-Notes` → AI), never touching `protected:` folders or `00_/90_/99_`. On apply:
+top-level notes move with **frontmatter rewrite** (category updated, old category kept as
+tag), **sub-category folders move intact** under the target, a single git commit records
+the change, and `_organize_log.md` documents the merge.
+
+### 📊 `/dashboard`
+
+**Use:** `/dashboard` — or let the weekly silent job refresh it.
+
+**How it works:** `storage/dashboard.py` scans every category folder, collects notes
+created/modified within `DASHBOARD_DAYS` (default 7), groups them per category
+(newest first) and writes `Recent Notes.md` at the vault root with plain `[[wikilinks]]` —
+no Obsidian plugin needed, works on every device. The weekly job only rewrites the file;
+it never messages you.
+
+### 💾 `/disk`
+
+**Use:** `/disk` anytime.
+
+**How it works:** `shutil.disk_usage` on the vault path — free-percentage vs
+`DISK_WARN_THRESHOLD_PCT` (default 20%). Below it, the bot also alerts proactively every
+6h (anti-spam cooldown via `DISK_ALERT_MINUTES`) and appends a ⚠️ warning to note replies —
+recommending more space or a bigger disk.
+
+### 🧠 `/models` — LLM switching
+
+**Use:** `/models` shows every reachable model as inline buttons — tap to switch instantly.
+
+**How it works:** `llm/provider.py` keeps a priority fallback chain
+(`LLM_MODEL` → `LLM_FALLBACKS` → free-tier auto-pick). **No scheduled checks** — the
+catalog is probed only when you run `/models` or when a quota/rate-limit error exhausts
+the chain (then it auto-switches to the best free model and tells you which one it used).
 
 ---
 
