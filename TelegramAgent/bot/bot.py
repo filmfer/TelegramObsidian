@@ -84,6 +84,7 @@ from storage.dedup_store import (
     init_db,
     pending_add,
     pending_clear,
+    pending_delete,
     pending_expire,
     pending_list,
 )
@@ -140,6 +141,10 @@ except ValueError:
     DASHBOARD_DAYS = 7
 USER_COOLDOWN_SECONDS = 10
 _user_last_request: dict = {}
+_user_last_warning: dict = {}  # suppress repeated rate-limit warnings per user
+
+# Telegram Bot API hard limit for getFile() downloads
+TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # 20 MB
 
 # /text + /voice pending queue (Task 4) — survives restarts via SQLite
 STAGING_DIR = Path(os.getenv("STAGING_DIR", "data/staging"))
@@ -269,20 +274,64 @@ async def model_choice_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 def _check_rate_limit(user_id: int) -> bool:
     """Return True if the user is allowed to proceed (cooldown elapsed)."""
+    last = _user_last_request.get(user_id)
+    if last is None:  # first request ever — always allowed
+        _user_last_request[user_id] = time.monotonic()
+        return True
     now = time.monotonic()
-    last = _user_last_request.get(user_id, 0)
     if now - last < USER_COOLDOWN_SECONDS:
         return False
     _user_last_request[user_id] = now
     return True
 
 
+def _too_large(media) -> bool:
+    """True if a Telegram media object exceeds the Bot API download limit."""
+    size = getattr(media, "file_size", None) or 0
+    return size > TELEGRAM_DOWNLOAD_LIMIT
+
+
+def _too_large_text(media) -> str:
+    size_mb = (getattr(media, "file_size", None) or 0) / (1024 * 1024)
+    return (
+        f"❌ This file is {size_mb:.0f}MB — Telegram's Bot API only allows "
+        "bots to download files up to 20MB.\n"
+        "Tip: compress it, split it, or send a platform link (YouTube etc.) instead."
+    )
+
+
+async def _rate_limited_reply(update: Update, user_id: int) -> bool:
+    """Cooldown gate. Warns at most once per cooldown window per user.
+
+    Returns True when the request must be dropped (still in cooldown).
+    """
+    if _check_rate_limit(user_id):
+        return False
+    now = time.monotonic()
+    last_warn = _user_last_warning.get(user_id)
+    if last_warn is None or now - last_warn >= USER_COOLDOWN_SECONDS:
+        _user_last_warning[user_id] = now
+        try:
+            await update.message.reply_text(
+                f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between uploads."
+            )
+        except Exception as e:
+            logger.warning("Could not send rate-limit warning: %s", e)
+    return True
+
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else 0
-    if not _check_rate_limit(user_id):
-        await update.message.reply_text(
-            f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between uploads."
+    if await _rate_limited_reply(update, user_id):
+        return
+
+    document = update.message.document
+    if _too_large(document):
+        logger.info(
+            "Rejected oversized document: %.1fMB",
+            (document.file_size or 0) / (1024 * 1024),
         )
+        await update.message.reply_text(_too_large_text(document))
         return
 
     caption = update.message.caption
@@ -318,6 +367,13 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _queue_document_as_voice(update, context):
     """Audio files sent as documents join the /voice queue (same as voice notes)."""
     media = update.message.document
+    if _too_large(media):
+        logger.info(
+            "Rejected oversized audio document: %.1fMB",
+            (media.file_size or 0) / (1024 * 1024),
+        )
+        await update.message.reply_text(_too_large_text(media))
+        return
     caption = (update.message.caption or "").strip()
     if "research" in caption.lower():
         status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
@@ -343,19 +399,35 @@ async def _queue_document_as_voice(update, context):
 async def _document_image_job(update, context, document, status):
     """Image sent as a document → download → vision/OCR → note."""
     with tempfile.TemporaryDirectory() as tmp:
-        file_obj = await document.get_file()
-        local_path = await file_obj.download_to_drive(tmp)
-        fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
-        force = _wants_force(update.message.caption or "")
-        if await _reject_duplicate(update, fingerprint, force):
+        try:
+            file_obj = await document.get_file()
+            local_path = await file_obj.download_to_drive(tmp)
+        except Exception as e:
+            logger.error("Image document download failed: %s", e, exc_info=True)
+            await status.fail(
+                "Could not download the image from Telegram "
+                "(file may exceed the 20MB Bot API limit). Try again."
+            )
             return
-        attachment_rel = _save_attachment(local_path)
-        detail = (
-            derive_detail_level(update.message.caption)
-            if update.message.caption
-            else "detailed"
-        )
-        extracted = await vision_extract([str(local_path)])
+        try:
+            fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
+            force = _wants_force(update.message.caption or "")
+            if await _reject_duplicate(update, fingerprint, force):
+                return
+            attachment_rel = _save_attachment(local_path)
+            detail = (
+                derive_detail_level(update.message.caption)
+                if update.message.caption
+                else "detailed"
+            )
+            extracted = await vision_extract([str(local_path)])
+        except Exception as e:
+            logger.error("Image processing failed: %s", e, exc_info=True)
+            await status.fail(
+                "The vision model could not process this image "
+                "(unsupported format, too large, or provider error)."
+            )
+            return
         if not extracted:
             await status.fail("Could not read any content from this image.")
             return
@@ -428,14 +500,14 @@ async def _document_job(update, file_obj, caption, detail_level, status):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """URLs are scraped+summarized; plain text becomes a personal knowledge note."""
+    text = (update.message.text or "").strip()
     user_id = update.effective_user.id if update.effective_user else 0
-    if not _check_rate_limit(user_id):
-        await update.message.reply_text(
-            f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between requests."
-        )
+    # Only URL processing is rate-limited; plain text queueing is cheap and must
+    # never drop user content mid-burst (that breaks /text batching).
+    if text.startswith(("http://", "https://")) and await _rate_limited_reply(
+        update, user_id
+    ):
         return
-
-    text = update.message.text.strip()
 
     # --- /learn two-step: photo with /learn, then plain text = reference ---
     if context.user_data.get("_hw_pending_ref"):
@@ -532,14 +604,33 @@ async def text_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = StatusMessage(
         await update.message.reply_text(f"📝 Creating your note from {len(items)} messages…")
     )
+    logger.info(
+        "Queue[text] chat=%s: processing %d item(s) (ids=%s)",
+        chat_id, len(items), [it["id"] for it in items],
+    )
+    ids = [it["id"] for it in items]
     try:
-        success = await run_with_deadline(status, _text_note_job(update, context, combined[:12000], detail, status))
-        if success is not TIMEOUT and success:
-            await asyncio.to_thread(pending_clear, chat_id, "text")
+        result = await run_with_deadline(
+            status, _text_note_job(update, context, combined[:12000], detail, status)
+        )
+        if result is TIMEOUT:
+            logger.warning("Queue[text] chat=%s: timed out — items kept for retry", chat_id)
+            return
+        # Success (True) or duplicate ("duplicate") → items are fully handled.
+        deleted = await asyncio.to_thread(pending_delete, ids)
+        logger.info(
+            "Queue[text] chat=%s: cleared %d item(s) after outcome=%r",
+            chat_id, deleted, result,
+        )
     except Exception as e:
-        logger.error(f"Text note command failed: {e}")
-        # Note: we do not clear the queue so the user can retry later.
-        pass
+        logger.error(
+            "Queue[text] chat=%s: processing failed — items kept for retry",
+            chat_id, exc_info=True,
+        )
+        # analyze_and_save already reported handled provider errors to the user;
+        # anything else gets a generic failure note here (never silent).
+        if not getattr(e, "handled", False):
+            await status.fail(f"Could not create the note: {e}")
 
 
 async def voice_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -556,13 +647,29 @@ async def voice_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     status = StatusMessage(
         await update.message.reply_text(f"🎙️ Transcribing {len(items)} audio(s)…")
     )
+    logger.info(
+        "Queue[voice] chat=%s: processing %d item(s) (ids=%s)",
+        chat_id, len(items), [it["id"] for it in items],
+    )
+    ids = [it["id"] for it in items]
     try:
-        success = await run_with_deadline(status, _voice_queue_job(update, context, items, status))
-        if success is not TIMEOUT and success:
-            await asyncio.to_thread(pending_clear, chat_id, "voice")
+        result = await run_with_deadline(status, _voice_queue_job(update, context, items, status))
+        if result is TIMEOUT:
+            logger.warning("Queue[voice] chat=%s: timed out — items kept for retry", chat_id)
+            return
+        # Success (True) or duplicate ("duplicate") → items are fully handled.
+        deleted = await asyncio.to_thread(pending_delete, ids)
+        logger.info(
+            "Queue[voice] chat=%s: cleared %d item(s) after outcome=%r",
+            chat_id, deleted, result,
+        )
     except Exception as e:
-        logger.error(f"Voice note command failed: {e}")
-        pass
+        logger.error(
+            "Queue[voice] chat=%s: processing failed — items kept for retry",
+            chat_id, exc_info=True,
+        )
+        if not getattr(e, "handled", False):
+            await status.fail(f"Could not create the note: {e}")
 
 async def _voice_queue_job(update, context, items, status):
     """Transcribe queued audio files sequentially, then build a merged note."""
@@ -733,13 +840,20 @@ async def _text_note_job(update, context, text, detail, status):
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Voice/audio is queued for /voice; captions with 'research' run instantly."""
     user_id = update.effective_user.id if update.effective_user else 0
-    if not _check_rate_limit(user_id):
-        await update.message.reply_text(
-            f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between requests."
-        )
+    if await _rate_limited_reply(update, user_id):
         return
 
     media = update.message.voice or update.message.audio
+    if not media:
+        await update.message.reply_text("❌ No audio received.")
+        return
+    if _too_large(media):
+        logger.info(
+            "Rejected oversized audio: %.1fMB",
+            (media.file_size or 0) / (1024 * 1024),
+        )
+        await update.message.reply_text(_too_large_text(media))
+        return
     caption = (update.message.caption or "").strip()
 
     # Instant research flow kept for backward compatibility
@@ -992,11 +1106,13 @@ async def _yt_audio_fallback(video_id: str) -> Optional[str]:
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Uploaded video → ffmpeg extracts audio → Groq Whisper → knowledge note."""
     user_id = update.effective_user.id if update.effective_user else 0
-    if not _check_rate_limit(user_id):
-        await update.message.reply_text(f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between requests.")
+    if await _rate_limited_reply(update, user_id):
         return
 
     video = update.message.video or update.message.document
+    if not video:
+        await update.message.reply_text("❌ No video received.")
+        return
     size_mb = (video.file_size or 0) / (1024 * 1024)
     if size_mb > 20:
         await update.message.reply_text(
@@ -1240,9 +1356,13 @@ async def analyze_and_save(
     fingerprint: str = "", force: bool = False,
     thumbnail: str = "",
 ):
-    """Run AI analysis and persist the resulting knowledge note."""
+    """Run AI analysis and persist the resulting knowledge note.
+
+    Returns the string "duplicate" when the dedup gate rejected the content
+    (already saved, no --force), True on success; raises on hard failures.
+    """
     if await _reject_duplicate(update, fingerprint, force):
-        return
+        return "duplicate"
     source_url = source if source_type == "link" else ""
     if source_kind is None:
         source_kind = "document"
@@ -1492,11 +1612,18 @@ _album_buffers: dict = {}
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Photo/screenshot → LLM vision (extract text+diagrams) → OCR fallback → note."""
+    media_group_id = update.message.media_group_id
+    if media_group_id:
+        # Album members are aggregated into ONE event — no per-photo rate limit,
+        # otherwise every photo after the first spams the cooldown warning.
+        photos = update.message.photo or []
+        if not photos:
+            return
+        await _buffer_album_photo(update, context, photos[-1], media_group_id)
+        return
+
     user_id = update.effective_user.id if update.effective_user else 0
-    if not _check_rate_limit(user_id):
-        await update.message.reply_text(
-            f"⏳ Please wait {USER_COOLDOWN_SECONDS}s between requests."
-        )
+    if await _rate_limited_reply(update, user_id):
         return
 
     photos = update.message.photo or []
@@ -1504,11 +1631,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ No image received.")
         return
     photo = photos[-1]  # largest available size
-
-    media_group_id = update.message.media_group_id
-    if media_group_id:
-        await _buffer_album_photo(update, context, photo, media_group_id)
-        return
 
     status = StatusMessage(await update.message.reply_text("🖼️ Reading image…"))
     await run_with_deadline(
@@ -1559,8 +1681,20 @@ async def _photo_job(update, context, messages, status, caption: str = ""):
             photo = msg.photo[-1] if msg.photo else None
             if photo is None:
                 continue
-            file_obj = await photo.get_file()
-            p = await file_obj.download_to_drive(tmp)
+            try:
+                file_obj = await photo.get_file()
+                p = await file_obj.download_to_drive(tmp)
+            except Exception as e:
+                logger.error(
+                    "Photo %d/%d download failed (media_group=%s): %s",
+                    i, len(messages),
+                    getattr(msg, "media_group_id", None), e, exc_info=True,
+                )
+                await status.fail(
+                    f"Could not download photo {i}/{len(messages)} from Telegram "
+                    "(file may exceed the 20MB Bot API limit). Try sending it again."
+                )
+                return
             paths.append(str(p))
         if not paths:
             await status.fail("No image data received.")
@@ -1589,7 +1723,16 @@ async def _photo_job(update, context, messages, status, caption: str = ""):
             await _handwritten_job(update, context, paths, status, fingerprint, force)
             return
 
-        extracted = await vision_extract(paths)
+        try:
+            extracted = await vision_extract(paths)
+        except Exception as e:
+            logger.error("Vision extraction failed for %d image(s): %s",
+                         len(paths), e, exc_info=True)
+            await status.fail(
+                "The vision model could not process these images "
+                "(unsupported format, too large, or provider error)."
+            )
+            return
         if not extracted:
             await status.fail("Could not read any content from these images.")
             return

@@ -15,9 +15,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 _YT_PATTERNS = (
-    r"(?:youtube\.com/watch\?(?:.*&)?v=)([\w\-]{11})",
+    r"(?:youtube\.com/watch\?(?:[^#]*&)?v=)([\w\-]{11})",
     r"(?:youtu\.be/)([\w\-]{11})",
     r"(?:youtube\.com/shorts/)([\w\-]{11})",
+    r"(?:(?:m|music)\.youtube\.com/watch\?(?:[^#]*&)?v=)([\w\-]{11})",
+    r"(?:youtube\.com/(?:embed|live|v)/)([\w\-]{11})",
 )
 
 UA = {
@@ -82,19 +84,45 @@ def fetch_youtube_transcript(video_id: str) -> Optional[str]:
 
 
 def _transcript_yt_api(video_id: str) -> Optional[str]:
-    """youtube-transcript-api captions (English + Portuguese)."""
+    """youtube-transcript-api captions.
+
+    Fallback order: manual captions in preferred languages → any available
+    manual captions → auto-generated captions → automatic translation to EN.
+    """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
 
         api = YouTubeTranscriptApi()
+        preferred = ["en", "en-US", "pt", "pt-BR"]
         try:
-            fetched = api.fetch(video_id, languages=["en", "en-US", "pt", "pt-BR"])
+            fetched = api.fetch(video_id, languages=preferred)
         except Exception:
-            listing = api.list(video_id)
-            codes = [t.language_code for t in listing]
-            if not codes:
+            try:
+                listing = list(api.list(video_id))
+            except Exception:
                 return None
-            fetched = api.fetch(video_id, languages=codes[:3])
+            if not listing:
+                return None
+            # manual captions first, then auto-generated
+            manual = [t for t in listing if getattr(t, "is_generated", False) is False]
+            candidates = (manual or listing)[:3]
+            fetched = None
+            for t in candidates:
+                try:
+                    fetched = t.fetch()
+                    break
+                except Exception as inner:
+                    logger.debug("caption track %s failed: %s", t.language_code, inner)
+            if fetched is None:
+                # last resort: translate the first available track to EN
+                for t in listing[:2]:
+                    try:
+                        fetched = t.translate("en").fetch()
+                        break
+                    except Exception as inner:
+                        logger.debug("translate %s failed: %s", t.language_code, inner)
+            if fetched is None:
+                return None
 
         parts = [snip.text for snip in fetched]
         text = " ".join(parts).replace("\n", " ").strip()
@@ -127,7 +155,8 @@ def _fetch_transcript_ytdlp(video_id: str, proxy: Optional[str] = None) -> Optio
 
     subtitles = info.get("subtitles") or {}
     auto_subs = info.get("automatic_captions") or {}
-    full_map = {**subtitles, **auto_subs}
+    # manual captions take priority — auto must NOT override them
+    full_map = {**auto_subs, **subtitles}
     track = None
     preferred = ("en", "en-US", "en-GB", "pt", "pt-BR")
     for p in preferred:

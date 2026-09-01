@@ -190,6 +190,19 @@ def pending_clear(chat_id: int, item_type: Optional[str] = None) -> int:
         return cur.rowcount or 0
 
 
+def pending_delete(ids: List[int]) -> int:
+    """Atomically delete specific queued items by id (parameterized)."""
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    with _connect() as conn:
+        cur = conn.execute(
+            f"DELETE FROM pending_items WHERE id IN ({placeholders})",
+            [int(i) for i in ids],
+        )
+        return cur.rowcount or 0
+
+
 def pending_expire(ttl_hours: int) -> int:
     """Drop queued items older than ttl_hours; returns rows removed."""
     with _connect() as conn:

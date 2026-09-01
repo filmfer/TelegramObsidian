@@ -435,7 +435,10 @@ async def chat_vision(
             return None
         return text, {"model": model}
     except Exception as e:
-        logger.error("Vision completion failed on '%s': %s", model, e)
+        logger.error(
+            "Vision completion failed on '%s': %s [%s]",
+            model, e, type(e).__name__, exc_info=True,
+        )
         return None
 
 def _set_catalog(catalog: Dict[str, List[str]]) -> None:
