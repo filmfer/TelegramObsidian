@@ -269,6 +269,46 @@ a dataset) is architecturally compatible — no rewrite needed.
 **Config:** `HANDWRITTEN_LANG=pt-PT` · `OCR_LANG=por` · `HANDWRITING_REF_DIR` ·
 `HANDWRITING_REF_MAX=3` · `HANDWRITING_DEV_MODE=true`
 
+### 🧯 Production hardening (v1.10.1)
+
+Fixes applied after real-world production reports — each one verified by
+`tests/test_prod_fixes.py` (26 checks):
+
+**1. Telegram 20MB download limit.** The Bot API refuses `getFile` downloads above
+20MB. Every handler (`document`, audio-as-document, `voice`/`audio`, `video`) now
+pre-checks `file_size` **before** attempting a download and answers with the exact
+size and a tip (compress / split / send a link) instead of a generic crash.
+
+**2. YouTube URL normalization + caption fallback.** `video_id` is extracted from
+every known URL shape: `watch?v=` (params in any order, `?si=…`), `youtu.be/`,
+`shorts/`, `embed/`, `live/`, `v/`, `m.` and `music.` hosts. Captions cascade
+**manual (preferred languages) → any manual → auto-generated → auto-translate to
+EN**; a bug where auto-generated subtitles overrode manual ones in the yt-dlp layer
+was fixed. No captions at all → descriptive warning (then audio-transcription route).
+
+**3. Queue lifecycle (`/text`, `/voice`, `/queue`).** Root cause of "items stuck
+forever": the dedup gate returned `None`, so the queue-clear step never ran. Now
+`analyze_and_save` returns `"duplicate"` for already-saved content; each command
+snapshots the item **IDs**, processes, and clears **exactly those IDs** atomically
+(new items that arrive mid-processing are preserved). Full lifecycle logging:
+`processing N item(s)` → `cleared N after outcome` → failures logged with
+`exc_info=True` and surfaced to the user — never silent. TIMEOUT keeps items for retry.
+
+**4. Image / multimodal error handling.** Photo downloads and vision-model calls are
+wrapped with specific try/except handlers: download failures (including >20MB),
+unsupported formats and provider errors each produce a targeted Telegram message and
+a full traceback in the logs — the generic error handler is no longer the first line
+of defense.
+
+**5. Album-aware rate limiting.** `media_group_id` is checked **before** the cooldown
+gate, so an album of 5 photos aggregates into a single processing event with **one**
+warning at most. A per-user warning-suppression window (`_user_last_warning`) kills
+repeated `Please wait 10s` bursts. Plain-text queueing is exempt from the cooldown
+(entirely) so batching text for `/text` can never drop messages. Bonus fix caught by
+tests: `time.monotonic()` starts at ~0 on some platforms, so `get(user_id, 0)`
+blocked *every* request during a container's first 10 seconds — first requests are
+now always allowed.
+
 ### 🗣️ Voice notes & audio · 💭 Plain-text thoughts
 
 **Use:** send voice messages or audio files — they queue silently; run `/voice` to
@@ -437,6 +477,7 @@ or when quota runs out — no unsolicited check messages.
 - [x] v1.8.1 — Zhipu fallback fixed: `zai/` provider prefix (litellm 1.83 rebrand) so GLM-4-Flash free tier is actually reachable; accepts `ZHIPU_API_KEY` or `ZAI_API_KEY`
 - [x] v1.9 — Image & album ingestion: LLM vision (free `zai/glm-4v-flash` / Groq llama-vision / OpenRouter qwen-vl) with Tesseract OCR fallback; album fusion into one note; audio/* documents routed to `/voice`; `/research` & video summarization never fail silently (quota/rate-limit errors surface with the exact provider message)
 - [ ] v1.10 (in development) — Handwritten notes (pt-PT): verbatim transcription via vision LLM + Tesseract-por fallback, `[?]` for illegible words, `/learn` few-shot training loop that adapts to the user's handwriting
+- [x] v1.10.1 — Production hardening: 20MB download pre-checks with exact-size messages · YouTube URL normalization (m./music./embed/live/shorts, any param order) + manual→auto→translated caption fallback · queue items cleared atomically by ID on success **or** duplicate (no more stuck queues) · targeted image/vision error messages with full tracebacks · album-aware rate limiting (one aggregated event, one warning max, plain-text batching exempt)
 - [ ] Semantic search over the vault (`/search <query>`)
 - [ ] Weekly review notes
 

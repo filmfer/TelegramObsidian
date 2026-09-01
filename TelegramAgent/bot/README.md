@@ -45,8 +45,8 @@ data/agent.db              SQLite state (dedup + queues) — outside the vault o
 | 📄 Documents: `PDF · DOCX · XLSX · TXT · MD · JSON · CSV · EML` | Full-text extraction → knowledge note |
 | 🔗 Links (`https://…`) | 3-layer scraping chain, SSRF-safe, `og:image` thumbnail |
 | 🧵 X/Twitter threads | Free fxtwitter API → author self-reply thread **+ author's external links fetched and merged** → one note (fallback: generic chain) |
-| 🎬 YouTube / video links | Caption transcript → summary note with video info + thumbnail |
-| 🎥 Uploaded videos (≤20MB) | ffmpeg extracts audio → Whisper → summary note |
+| 🎬 YouTube / video links | Caption transcript (manual → auto-generated → auto-translated; any URL format incl. `m.`/`music.`/`shorts`/`embed`/`live` and `?si=` params) → summary note with video info + thumbnail |
+| 🎥 Uploaded videos (≤20MB) | Size pre-checked against the Bot API limit → ffmpeg extracts audio → Whisper → summary note |
 | 📖 E-books: `EPUB · MOBI · AZW/AZW3/AZW4 · DJVU · FB2 · LIT · PDF` | Real chapters detected (EPUB/FB2 TOC, PDF headings) → detailed per-chapter summaries → multi-page study note + the complete book saved as Markdown (background, live progress) |
 | 📧 Email files (`.eml`) | Parsed → knowledge note |
 | 💭 Plain text | Queued → `/text` merges into one structured note |
@@ -243,6 +243,9 @@ cd TelegramAgent/bot && docker compose up -d --build
 | Voice note gets no answer | Check `GROQ_API_KEY` (Whisper); transcription errors are always reported. |
 | `/disk` | Manual disk report. Proactive alert + inline note warning when free space < `DISK_WARN_THRESHOLD_PCT`%. |
 | Handwritten note transcribed poorly ⚠️ | Feature under development. Retrain with `/learn` (photo → correct text); each sample improves future transcriptions. Illegible words appear as `[?]`. |
+| File rejected with "20MB" message | Telegram's Bot API caps bot downloads at 20MB. The bot now detects this **before** downloading. Compress/split the file or send a platform link instead. |
+| `/queue` shows items but note already created | Fixed in v1.10.1 — items are cleared atomically by ID on success **or** duplicate. If it persists: `docker compose logs telegram-agent | grep 'Queue\\['` shows the lifecycle (added → processing → cleared). |
+| Album spams "Please wait 10s" | Fixed in v1.10.1 — album photos aggregate into one event; warnings are suppressed to one per cooldown window per user. |
 | rclone mount down | `systemctl status rclone-gdrive --no-pager` · `sudo rclone lsd gdrive:` |
 
 ---
