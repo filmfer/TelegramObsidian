@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -86,6 +87,40 @@ def main():
               "p0.jpg" in body.split("---")[1])
         check("body preserved after gallery", "body text" in body)
 
+    # 5. robust download helper: size pre-check, honest errors
+    big = SimpleNamespace(file_size=25 * 1024 * 1024)
+    try:
+        asyncio_run(bot._download_telegram_file(big, td, what="x"))
+        check("oversized raises FileTooBigError", False)
+    except bot.FileTooBigError:
+        check("oversized raises FileTooBigError", True)
+    except Exception as e:
+        check(f"oversized raises FileTooBigError (got {type(e).__name__})", False)
+
+    txt = bot._download_error_text("photo", bot.FileTooBigError("25MB"))
+    check("too-big message mentions 20MB", "20MB" in txt)
+    txt2 = bot._download_error_text(
+        "photo", bot.PhotoDownloadError("TimedOut: read timeout")
+    )
+    check("network failure shows the REAL error, no 20MB blame",
+          "TimedOut" in txt2 and "20MB" not in txt2)
+
+    # success path via mocked get_file/download_to_drive
+    class FakeFile:
+        async def download_to_drive(self, dest):
+            p = Path(dest) / "ok.jpg"
+            p.write_bytes(b"data")
+            return str(p)
+
+    class FakeMedia:
+        file_size = 1024
+
+        async def get_file(self):
+            return FakeFile()
+
+    got = asyncio_run(_dl_ok(td))
+    check("happy path returns file path", isinstance(got, str) and got.endswith("ok.jpg"))
+
     print(f"\n{sum(1 for _, ok in results if ok)}/{len(results)} checks passed")
     return 0 if all(ok for _, ok in results) else 1
 
@@ -93,6 +128,28 @@ def main():
 def asyncio_run(coro):
     import asyncio
     return asyncio.get_event_loop().run_until_complete(coro)
+
+
+async def _dl_ok(_td):
+    """Happy-path download into a FRESH temp dir (the previous one may be closed)."""
+    import tempfile
+
+    import bot as _bot
+
+    class FakeFile:
+        async def download_to_drive(self, dest):
+            p = Path(dest) / "ok.jpg"
+            p.write_bytes(b"data")
+            return str(p)
+
+    class FakeMedia:
+        file_size = 1024
+
+        async def get_file(self):
+            return FakeFile()
+
+    with tempfile.TemporaryDirectory() as fresh:
+        return await _bot._download_telegram_file(FakeMedia(), fresh, what="ok")
 
 
 if __name__ == "__main__":

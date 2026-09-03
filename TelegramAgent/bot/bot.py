@@ -400,14 +400,12 @@ async def _document_image_job(update, context, document, status):
     """Image sent as a document → download → vision/OCR → note."""
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            file_obj = await document.get_file()
-            local_path = await file_obj.download_to_drive(tmp)
+            local_path = await _download_telegram_file(
+                document, tmp, what="image document"
+            )
         except Exception as e:
             logger.error("Image document download failed: %s", e, exc_info=True)
-            await status.fail(
-                "Could not download the image from Telegram "
-                "(file may exceed the 20MB Bot API limit). Try again."
-            )
+            await status.fail(_download_error_text("image", e))
             return
         try:
             fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
@@ -1697,6 +1695,71 @@ async def _process_album(media_group_id):
         _album_buffers.pop(media_group_id, None)
 
 
+class PhotoDownloadError(Exception):
+    """Raised when a Telegram media download fails after retries."""
+
+
+class FileTooBigError(PhotoDownloadError):
+    """Media exceeds the Telegram Bot API 20MB download limit."""
+
+
+async def _download_telegram_file(media, dest_dir: str, what: str = "file") -> str:
+    """Robustly download a Telegram File to dest_dir.
+
+    - Pre-checks file_size against the Bot API 20MB limit (raises FileTooBigError).
+    - Retries once on transient network errors, then falls back to
+      download_to_memory + manual write.
+    Returns the local file path. Raises PhotoDownloadError with the real
+    exception chained, so callers can show an honest error message.
+    """
+    size = getattr(media, "file_size", None) or 0
+    if size > TELEGRAM_DOWNLOAD_LIMIT:
+        raise FileTooBigError(
+            f"{size / (1024 * 1024):.0f}MB exceeds the 20MB Bot API limit"
+        )
+    last_exc: Optional[Exception] = None
+    for attempt in (1, 2):
+        try:
+            file_obj = await media.get_file()
+            return await file_obj.download_to_drive(dest_dir)
+        except Exception as e:
+            last_exc = e
+            logger.warning(
+                "%s download attempt %d/2 failed: %s [%s]",
+                what, attempt, e, type(e).__name__,
+            )
+            await asyncio.sleep(1)
+    # Last resort: in-memory download (survives odd drive-write failures)
+    try:
+        file_obj = await media.get_file()
+        buf = await file_obj.download_as_bytearray()
+        dest = Path(dest_dir) / f"{what.replace(' ', '_')}.bin"
+        dest.write_bytes(bytes(buf))
+        logger.info("%s downloaded via memory fallback (%d bytes)", what, len(buf))
+        return str(dest)
+    except Exception as e:
+        last_exc = e
+    logger.error("%s download failed for good: %s [%s]",
+                 what, last_exc, type(last_exc).__name__, exc_info=True)
+    raise PhotoDownloadError(
+        f"{type(last_exc).__name__}: {last_exc}"
+    ) from last_exc
+
+
+def _download_error_text(what: str, err: Exception) -> str:
+    """Honest, actionable download-failure message (no wrong 20MB blame)."""
+    if isinstance(err, FileTooBigError):
+        return (
+            f"❌ This {what} is too big for the Telegram Bot API "
+            "(downloads are capped at 20MB). Compress it or send a link instead."
+        )
+    return (
+        f"❌ Could not download the {what} from Telegram.\n"
+        f"Real error: {err}\n"
+        "It may be a temporary network issue — try again in a moment."
+    )
+
+
 async def _photo_job(update, context, messages, status, caption: str = ""):
     """Download N photos → fingerprint → vision/OCR extraction → analyze_and_save."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -1706,18 +1769,16 @@ async def _photo_job(update, context, messages, status, caption: str = ""):
             if photo is None:
                 continue
             try:
-                file_obj = await photo.get_file()
-                p = await file_obj.download_to_drive(tmp)
+                p = await _download_telegram_file(
+                    photo, tmp, what=f"photo {i} of {len(messages)}"
+                )
             except Exception as e:
                 logger.error(
                     "Photo %d/%d download failed (media_group=%s): %s",
                     i, len(messages),
                     getattr(msg, "media_group_id", None), e, exc_info=True,
                 )
-                await status.fail(
-                    f"Could not download photo {i}/{len(messages)} from Telegram "
-                    "(file may exceed the 20MB Bot API limit). Try sending it again."
-                )
+                await status.fail(_download_error_text(f"photo {i}/{len(messages)}", e))
                 return
             paths.append(str(p))
         if not paths:
