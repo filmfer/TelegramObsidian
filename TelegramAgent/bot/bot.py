@@ -749,15 +749,17 @@ async def _voice_queue_job(update, context, items, status):
         )
         return False
 
-    combined = "\n\n---\n\n".join(transcripts)[:12000]
+    full_transcript = "\n\n---\n\n".join(transcripts).strip()
+    summary_src = full_transcript[:12000]  # bounded excerpt for the LLM
     detail = context.user_data.get("detail_level", "detailed")
     await status.update("✍️ Creating your note…")
     result = await analyze_and_save(
-        update, context, combined, detail,
+        update, context, summary_src, detail,
         source="telegram-voice::queued batch",
         source_type="voice",
         source_kind="text",
-        fingerprint=compute_text_fingerprint(combined),
+        fingerprint=compute_text_fingerprint(summary_src),
+        raw_text=full_transcript,
     )
 
     # Cleanup staging files ONLY if success
@@ -1449,8 +1451,13 @@ async def analyze_and_save(
     fingerprint: str = "", force: bool = False,
     thumbnail: str = "",
     attachments: Optional[List[str]] = None,
+    raw_text: str = "",
 ):
     """Run AI analysis and persist the resulting knowledge note.
+
+    ``raw_text`` (optional) is appended verbatim at the end of the note under
+    a separator heading — used by queued audio so the note contains BOTH the
+    AI /detailed-style summary AND the full transcription.
 
     Returns the string "duplicate" when the dedup gate rejected the content
     (already saved, no --force), True on success; raises on hard failures.
@@ -1502,6 +1509,23 @@ async def analyze_and_save(
     if fingerprint:
         await arecord_processed(fingerprint, source_type, source, note_path)
 
+    # Append the raw transcript (or any raw text) at the end of the note.
+    if raw_text and raw_text.strip():
+        try:
+            note_file = (Path(VAULT_PATH) / note_path)
+            with open(note_file, "a", encoding="utf-8") as f:
+                f.write(
+                    "\n\n---\n\n"
+                    "## 📜 Full Transcription\n\n"
+                    f"{raw_text.strip()}\n"
+                )
+            logger.info("Appended raw transcript (%d chars) to %s",
+                        len(raw_text.strip()), note_path)
+            note_dict["_raw_appended"] = True
+        except Exception as e:
+            logger.error(f"Could not append raw transcript to {note_path}: {e}",
+                         exc_info=True)
+
     preview = (note_dict.get("content") or "")[:400]
     msg = f"✅ Saved to vault!\n📂 {note_path}\n\n📝 {note_dict.get('title')}\n---\n{preview}"
     meta = note_dict.get("_meta_info", {})
@@ -1515,6 +1539,8 @@ async def analyze_and_save(
     
     if low_disk(VAULT_PATH):
         msg += f"\n\n⚠️ Disk space low: {format_disk(VAULT_PATH)}"
+    if note_dict.get("_raw_appended"):
+        msg += "\n\n📜 Full transcript appended to the note."
     await update.message.reply_text(
         msg,
         disable_web_page_preview=True,
