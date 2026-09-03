@@ -69,6 +69,7 @@ Send with a caption or `/command`:
 |---|---|
 | `/text` | Turn every queued text message into **one** note |
 | `/voice` | Transcribe every queued audio into **one** note |
+| `/image` *(caption on a photo or album)* | **Detailed image analysis** like the link flow — every original image embedded as a gallery in the note; free vision models first, paid Gemini as automatic fallback; your active text model is restored afterwards |
 | `/queue` | See what's waiting in the queues |
 | `/disk` | Check vault disk usage & warnings if space < 20% |
 | `/research <topic>` | Deep web research with cited sources |
