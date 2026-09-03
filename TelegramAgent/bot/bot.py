@@ -1670,8 +1670,26 @@ async def _buffer_album_photo(update, context, photo, media_group_id):
     buf["messages"].append(update.message)
     if update.message.caption:
         buf["caption"] = update.message.caption
+    logger.info(
+        "Album %s buffered: %d image(s) so far", media_group_id, len(buf["messages"])
+    )
     if buf["task"] is None or buf["task"].done():
-        buf["task"] = asyncio.create_task(_process_album(media_group_id))
+        try:
+            buf["task"] = asyncio.create_task(_process_album(media_group_id))
+            # Safety net: a task that dies unobserved must at least scream in
+            # the logs (it cannot reach the user if the loop already collapsed).
+            buf["task"].add_done_callback(_log_task_exception)
+        except Exception as e:
+            logger.error("Could not start album task: %s", e, exc_info=True)
+
+
+def _log_task_exception(task) -> None:
+    """done_callback: surface exceptions that would otherwise be swallowed."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.error("Album background task crashed: %s", exc, exc_info=exc)
 
 
 async def _process_album(media_group_id):
@@ -1680,12 +1698,17 @@ async def _process_album(media_group_id):
     if not buf or not buf["messages"]:
         return
     update = buf["messages"][0]
-    status = StatusMessage(
-        await update.effective_chat.send_message(
-            f"🖼️ Reading album ({len(buf['messages'])} images)…"
-        )
+    logger.info(
+        "Album %s processing started (%d images, caption=%r)",
+        media_group_id, len(buf["messages"]), buf["caption"][:40],
     )
+    status = None
     try:
+        status = StatusMessage(
+            await update.effective_chat.send_message(
+                f"🖼️ Reading album ({len(buf['messages'])} images)…"
+            )
+        )
         await run_with_deadline(
             status,
             _photo_job(update, buf.get("context"), buf["messages"], status, caption=buf["caption"]),
@@ -1697,10 +1720,16 @@ async def _process_album(media_group_id):
         logger.error("Album %s processing failed: %s", media_group_id, e, exc_info=True)
         if not getattr(e, "handled", False):
             try:
-                await status.fail(
-                    f"Album processing failed: {e}\n"
-                    "Try sending the images again (or one by one)."
-                )
+                if status is None:
+                    # even the initial status message failed — reply directly
+                    await update.effective_chat.send_message(
+                        f"❌ Album processing failed: {e}"
+                    )
+                else:
+                    await status.fail(
+                        f"Album processing failed: {e}\n"
+                        "Try sending the images again (or one by one)."
+                    )
             except Exception:
                 logger.error("Could not deliver album failure message", exc_info=True)
     finally:
