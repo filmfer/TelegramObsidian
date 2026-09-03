@@ -50,7 +50,7 @@ data/agent.db              SQLite state (dedup + queues) — outside the vault o
 | 📖 E-books: `EPUB · MOBI · AZW/AZW3/AZW4 · DJVU · FB2 · LIT · PDF` | Real chapters detected (EPUB/FB2 TOC, PDF headings) → detailed per-chapter summaries → multi-page study note + the complete book saved as Markdown (background, live progress) |
 | 📧 Email files (`.eml`) | Parsed → knowledge note |
 | 💭 Plain text | Queued → `/text` merges into one structured note |
-| 🎵 Audio files (`mp3/wav/m4a/ogg` sent as documents or voice) | Queued → `/voice` (or `/audio`) transcribes (free Whisper) into one note; caption `research` = instant deep search; caption `/audio` = transcribe immediately |
+| 🎵 Audio files (`mp3/wav/m4a/ogg` sent as documents or voice, **same unified flow**) | Queued → `/voice` (alias `/audio`) transcribes (free Groq Whisper) into one note; **caption `/voice` or `/audio` = transcribe immediately**; long files auto-split; caption `research` = instant deep search |
 | 🖼️ Images / screenshots / albums | LLM vision (text, boxes, bullets, diagrams) + Tesseract OCR fallback → categorized note; albums fused into one note |
 | 🖼️ `/image` (caption on photo/album) | **Detailed analysis** like the link flow + **every original image embedded as a gallery** in the note; free vision tiers first, paid Gemini as automatic fallback; active text model restored afterwards |
 | 🔎 `/research <topic>` | DuckDuckGo → scrape top sources → cited synthesis note |

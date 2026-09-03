@@ -44,7 +44,7 @@ You → Telegram → 🧠 AI → Obsidian Vault → all your devices
 | 📖 | E-books: EPUB · MOBI · AZW·AZW3·AZW4 · DJVU · FB2 · LIT | Title / author / year + multi-page study note with **chapter-by-chapter summaries** and the complete book converted to Markdown, linked from the note |
 | 📧 | Email files (`.eml`) | Parsed → knowledge note |
 | 💭 | **Plain text thoughts** | Queued safely, then `/text` merges them into one structured, categorized note |
-| 🗣️ | Voice notes (`.ogg` / audio files) | Queued, then `/voice` or `/audio` transcribes (free Whisper) into one note · caption `research` = instant deep search · **caption `/audio` = transcribe immediately** |
+| 🗣️ | Voice notes (`.ogg`) & audio files (`mp3/wav/m4a`…) — **same flow, unified** | Queued, then `/voice` (alias `/audio`) transcribes (free Groq Whisper) into one note · **caption `/voice` or `/audio` = transcribe immediately** · long files auto-split into segments · caption `research` = instant deep search |
 | 🎥 | Uploaded video files (≤20MB) | ffmpeg extracts audio → Whisper transcript → summary note |
 | 🖼️ | **Images / screenshots / albums** | LLM vision (extract text, boxes, bullets, diagrams) with **Tesseract OCR fallback** native to the server → categorized note; multi-photo albums fused into **one** note |
 
@@ -68,8 +68,7 @@ Send with a caption or `/command`:
 | Command | Action |
 |---|---|
 | `/text` | Turn every queued text message into **one** note |
-| `/voice` | Transcribe every queued audio into **one** note |
-| `/audio` | Same as `/voice` — **also works as a caption on a voice/audio message** to transcribe it immediately (like `/image` for photos) |
+| `/voice` · `/audio` | **One function, two names** — transcribe every queued audio into **one** note; used as a **caption** on a voice message or audio file it transcribes immediately (both work the same) |
 | `/image` *(caption on a photo or album)* | **Detailed image analysis** like the link flow — every original image embedded as a gallery in the note; free vision models first, paid Gemini as automatic fallback; your active text model is restored afterwards |
 | `/queue` | See what's waiting in the queues |
 | `/disk` | Check vault disk usage & warnings if space < 20% |

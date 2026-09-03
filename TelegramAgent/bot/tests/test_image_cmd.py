@@ -168,8 +168,9 @@ def main():
     src_text = Path(bot.__file__).read_text()
     check("/audio command registered",
           'CommandHandler("audio", voice_note_command)' in src_text)
-    check("captions starting with /audio transcribe immediately",
-          'lstrip("/").startswith("audio")' in src_text)
+    check("captions starting with /audio or /voice transcribe immediately",
+          'lstrip("/").startswith(("audio", "voice"))' in src_text or
+          'startswith(("audio", "voice"))' in src_text)
     check("audio download uses robust helper",
           "_download_telegram_file(media, staging" in src_text)
 

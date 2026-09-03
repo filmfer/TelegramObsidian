@@ -205,9 +205,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/image — (caption on a photo/album) detailed analysis + all\n"
         "        original images embedded as a gallery in the note\n"
         "/text — build a note from queued text messages\n"
-        "/voice — transcribe queued audio into a note\n"
-        "/audio — same as /voice; also works as a caption on a voice/audio\n"
-        "        message to transcribe it immediately\n"
+        "/voice · /audio — transcribe queued audio into one note; used as a\n"
+        "        caption on a voice message or audio file it transcribes\n"
+        "        immediately (same behaviour for both)\n"
         "/queue — see what's waiting\n"
         "/research <topic> — deep web research, cited sources\n"
         "Detail levels: /summarize /detailed /precise /raw /book\n"
@@ -401,7 +401,7 @@ async def _queue_document_as_voice(update, context):
         await update.message.reply_text(_download_error_text("audio", e))
         return
     # Caption /audio → transcribe & create the note immediately (like /image).
-    if caption.lower().lstrip("/").startswith("audio"):
+    if caption.lower().lstrip("/").startswith(("audio", "voice")):
         status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
         item = {
             "id": 0,
@@ -899,8 +899,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(_download_error_text("audio", e))
         return
 
-    # Caption /audio → transcribe & create the note immediately (like /image).
-    if caption.lower().lstrip("/").startswith("audio"):
+    # Caption /audio or /voice → transcribe & create the note immediately
+    # (unified with /image-style captions; voice note and audio file alike).
+    if caption.lower().lstrip("/").startswith(("audio", "voice")):
         status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
         item = {
             "id": 0,

@@ -32,10 +32,38 @@ class TranscriptionError(Exception):
     """Raised when audio transcription fails for a known reason."""
 
 
+def _convert_to_mp3(src: str) -> Optional[str]:
+    """Repackage any audio to MP3 (mono 64k) for Groq compatibility.
+
+    Groq's whisper refuses some containers/codecs with HTTP 400 (e.g. some
+    Opus/OGG variants). Returns the temp mp3 path, or None on failure
+    (caller falls back to the raw file).
+    """
+    d = Path(src).with_name(f"{Path(src).stem}_groq.mp3")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", src,
+                "-ac", "1", "-b:a", "64k", str(d),
+            ],
+            capture_output=True,
+            timeout=120,
+            check=True,
+        )
+        logger.info("Converted %s → %s for Groq", Path(src).name, d.name)
+        return str(d)
+    except Exception as e:
+        logger.warning("ffmpeg conversion failed (%s) — sending raw file", e)
+        return None
+
+
 async def transcribe_audio(file_path: str, language: Optional[str] = None) -> str:
     """
     Transcribe an audio file using Groq's hosted whisper-large-v3 (free tier).
     Returns the transcript text. Raises TranscriptionError on failure.
+
+    Files in containers Groq may reject (`.oga`/`.opus`, or unknown MIME) are
+    pre-converted to MP3 with ffmpeg and sent with the correct name/MIME.
     """
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -53,8 +81,26 @@ async def transcribe_audio(file_path: str, language: Optional[str] = None) -> st
     if size == 0:
         raise TranscriptionError("Audio file is empty.")
 
-    mime = mimetypes.guess_type(path.name)[0] or "audio/ogg"
-    content = path.read_bytes()
+    mime = mimetypes.guess_type(path.name)[0] or ""
+    upload = path
+
+    # Groq rejects some containers/codecs (e.g. some Opus/OGG) with HTTP 400.
+    # Pre-convert anything risky to MP3 and send the correctly-named file.
+    if (
+        mime not in ("audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4",
+                     "audio/x-m4a", "audio/webm", "audio/flac", "audio/ogg")
+        or Path(path.name).suffix.lower() not in _GROQ_SAFE_EXTENSIONS
+    ):
+        converted = _convert_to_mp3(str(path))
+        if converted:
+            upload = Path(converted)
+    elif mime == "audio/ogg" and Path(path.name).suffix.lower() in (".oga", ".opus", ".ogg"):
+        converted = _convert_to_mp3(str(path))
+        if converted:
+            upload = Path(converted)
+
+    up_mime = mimetypes.guess_type(upload.name)[0] or "audio/mpeg"
+    content = upload.read_bytes()
 
     data = {"model": WHISPER_MODEL, "response_format": "text"}
     if language:
@@ -65,7 +111,7 @@ async def transcribe_audio(file_path: str, language: Optional[str] = None) -> st
             r = await client.post(
                 GROQ_TRANSCRIBE_URL,
                 headers={"Authorization": f"Bearer {api_key}"},
-                files={"file": (path.name, content, mime)},
+                files={"file": (upload.name, content, up_mime)},
                 data=data,
             )
         if r.status_code == 429:
@@ -74,16 +120,26 @@ async def transcribe_audio(file_path: str, language: Optional[str] = None) -> st
         transcript = (r.text or "").strip()
         if not transcript:
             raise TranscriptionError("Transcription came back empty.")
-        logger.info(f"Transcribed {path.name} ({size // 1024}KB → {len(transcript)} chars)")
+        logger.info(f"Transcribed {upload.name} ({content.__len__() // 1024}KB → {len(transcript)} chars)")
         return transcript
     except TranscriptionError:
         raise
     except httpx.HTTPStatusError as e:
-        logger.error(f"Groq transcription HTTP error: {e.response.text[:300]}")
-        raise TranscriptionError(f"Groq API error {e.response.status_code}.")
+        body = (e.response.text or "")[:300]
+        logger.error(f"Groq transcription HTTP error {e.response.status_code}: {body}")
+        raise TranscriptionError(
+            f"Groq API error {e.response.status_code}: {body}"
+        )
     except Exception as e:
         logger.error(f"Groq transcription failed: {e}")
         raise TranscriptionError(f"Transcription failed: {e}")
+    finally:
+        # Clean up the temporary mp3 created for Groq compatibility.
+        if upload != path:
+            try:
+                Path(upload).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 # ---- Local transcription (free, no size limit) ----
