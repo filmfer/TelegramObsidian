@@ -1678,7 +1678,6 @@ async def _process_album(media_group_id):
     await asyncio.sleep(ALBUM_HOLD_SECONDS)
     buf = _album_buffers.pop(media_group_id, None)
     if not buf or not buf["messages"]:
-        _album_buffers.pop(media_group_id, None)
         return
     update = buf["messages"][0]
     status = StatusMessage(
@@ -1691,6 +1690,19 @@ async def _process_album(media_group_id):
             status,
             _photo_job(update, buf.get("context"), buf["messages"], status, caption=buf["caption"]),
         )
+    except Exception as e:
+        # create_task swallows exceptions silently — the user would get NO
+        # response at all. Always report what happened (real cause when the
+        # error was not already surfaced downstream).
+        logger.error("Album %s processing failed: %s", media_group_id, e, exc_info=True)
+        if not getattr(e, "handled", False):
+            try:
+                await status.fail(
+                    f"Album processing failed: {e}\n"
+                    "Try sending the images again (or one by one)."
+                )
+            except Exception:
+                logger.error("Could not deliver album failure message", exc_info=True)
     finally:
         _album_buffers.pop(media_group_id, None)
 

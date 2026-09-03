@@ -121,6 +121,47 @@ def main():
     got = asyncio_run(_dl_ok(td))
     check("happy path returns file path", isinstance(got, str) and got.endswith("ok.jpg"))
 
+    # 6. album failure must NEVER be silent (create_task swallowing bug)
+    sent2 = []
+
+    class FailStatus:
+        async def fail(self, reason):
+            sent2.append(reason)
+
+        async def update(self, text):
+            pass
+
+    class FakeChat:
+        async def send_message(self, text, **kw):
+            sent2.append(text)
+            async def edit(t, **kw2):
+                sent2.append(t)
+            return SimpleNamespace(edit_text=edit)
+
+    class FakeMsg2:
+        caption = ""
+        photo = [SimpleNamespace()]
+        effective_chat = FakeChat()
+
+        async def reply_text(self, t, **kw):
+            sent2.append(t)
+
+    fake_update = SimpleNamespace(message=FakeMsg2(), effective_chat=FakeChat())
+    bot._album_buffers["mg-test"] = {
+        "messages": [fake_update], "caption": "",
+        "task": None, "context": None,
+    }
+
+    async def boom(*a, **k):
+        raise RuntimeError("vision exploded")
+
+    with patch.object(bot, "_photo_job", side_effect=boom):
+        asyncio_run(bot._process_album("mg-test"))
+    check("album failure reaches the user", any("failed" in x for x in sent2))
+    check("album failure includes the real cause",
+          any("vision exploded" in x for x in sent2))
+    check("album buffer cleaned after failure", "mg-test" not in bot._album_buffers)
+
     print(f"\n{sum(1 for _, ok in results if ok)}/{len(results)} checks passed")
     return 0 if all(ok for _, ok in results) else 1
 
