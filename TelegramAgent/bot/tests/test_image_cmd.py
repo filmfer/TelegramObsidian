@@ -164,6 +164,15 @@ def main():
           any("vision exploded" in x for x in sent2))
     check("album buffer cleaned after failure", "mg-test" not in bot._album_buffers)
 
+    # 7. /audio command + caption immediate-transcription path
+    src_text = Path(bot.__file__).read_text()
+    check("/audio command registered",
+          'CommandHandler("audio", voice_note_command)' in src_text)
+    check("captions starting with /audio transcribe immediately",
+          'lstrip("/").startswith("audio")' in src_text)
+    check("audio download uses robust helper",
+          "_download_telegram_file(media, staging" in src_text)
+
     print(f"\n{sum(1 for _, ok in results if ok)}/{len(results)} checks passed")
     return 0 if all(ok for _, ok in results) else 1
 

@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -205,6 +206,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "        original images embedded as a gallery in the note\n"
         "/text — build a note from queued text messages\n"
         "/voice — transcribe queued audio into a note\n"
+        "/audio — same as /voice; also works as a caption on a voice/audio\n"
+        "        message to transcribe it immediately\n"
         "/queue — see what's waiting\n"
         "/research <topic> — deep web research, cited sources\n"
         "Detail levels: /summarize /detailed /precise /raw /book\n"
@@ -392,11 +395,20 @@ async def _queue_document_as_voice(update, context):
     staging = STAGING_DIR / str(chat_id)
     staging.mkdir(parents=True, exist_ok=True)
     try:
-        file_obj = await media.get_file()
-        local_path = await file_obj.download_to_drive(staging)
+        local_path = await _download_telegram_file(media, staging, what="audio document")
     except Exception as e:
-        logger.error(f"Could not download audio document: {e}")
-        await update.message.reply_text("❌ Could not download the audio. Try again.")
+        logger.error("Could not download audio document: %s", e, exc_info=True)
+        await update.message.reply_text(_download_error_text("audio", e))
+        return
+    # Caption /audio → transcribe & create the note immediately (like /image).
+    if caption.lower().lstrip("/").startswith("audio"):
+        status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
+        item = {
+            "id": 0,
+            "content": str(local_path),
+            "received_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        await run_with_deadline(status, _voice_queue_job(update, context, [item], status))
         return
     n = await asyncio.to_thread(pending_add, chat_id, "voice", str(local_path))
     await update.message.reply_text(
@@ -881,11 +893,23 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     staging = STAGING_DIR / str(chat_id)
     staging.mkdir(parents=True, exist_ok=True)
     try:
-        file_obj = await media.get_file()
-        local_path = await file_obj.download_to_drive(staging)
+        local_path = await _download_telegram_file(media, staging, what="audio")
     except Exception as e:
-        logger.error(f"Could not download queued audio: {e}")
-        await update.message.reply_text("❌ Could not download the audio. Try again.")
+        logger.error("Could not download queued audio: %s", e, exc_info=True)
+        await update.message.reply_text(_download_error_text("audio", e))
+        return
+
+    # Caption /audio → transcribe & create the note immediately (like /image).
+    if caption.lower().lstrip("/").startswith("audio"):
+        status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
+        item = {
+            "id": 0,
+            "content": str(local_path),
+            "received_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        await run_with_deadline(
+            status, _voice_queue_job(update, context, [item], status)
+        )
         return
 
     n = await asyncio.to_thread(pending_add, chat_id, "voice", str(local_path))
@@ -1599,6 +1623,7 @@ def main():
     app.add_handler(CommandHandler("models", models_command))
     app.add_handler(CommandHandler("disk", disk_command))
     app.add_handler(CommandHandler("voice", voice_note_command))
+    app.add_handler(CommandHandler("audio", voice_note_command))
     app.add_handler(CommandHandler("queue", queue_command))
     app.add_handler(CommandHandler("organize", organize_command))
     app.add_handler(CommandHandler("dashboard", dashboard_command))
