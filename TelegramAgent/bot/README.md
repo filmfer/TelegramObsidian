@@ -52,6 +52,7 @@ data/agent.db              SQLite state (dedup + queues) — outside the vault o
 | 💭 Plain text | Queued → `/text` merges into one structured note |
 | 🎵 Audio files (`mp3/wav/m4a/ogg` sent as documents or voice) | Queued → `/voice` transcribes (free Whisper) into one note; caption `research` = instant deep search |
 | 🖼️ Images / screenshots / albums | LLM vision (text, boxes, bullets, diagrams) + Tesseract OCR fallback → categorized note; albums fused into one note |
+| 🖼️ `/image` (caption on photo/album) | **Detailed analysis** like the link flow + **every original image embedded as a gallery** in the note; free vision tiers first, paid Gemini as automatic fallback; active text model restored afterwards |
 | 🔎 `/research <topic>` | DuckDuckGo → scrape top sources → cited synthesis note |
 
 ### Detail levels (caption or command)

@@ -115,6 +115,7 @@ def write_note_to_vault(note: Dict[str, Any]) -> Optional[str]:
         "tags": note.get("tags", []),
         "detail_level": note.get("detail_level", DEFAULT_DETAIL),
         "attachment": note.get("attachment", ""),
+        "attachments": note.get("attachments", []),
         "thumbnail": note.get("thumbnail", ""),
         "book_title": note.get("book_title", ""),
         "book_authors": note.get("book_authors", []),
@@ -122,6 +123,16 @@ def write_note_to_vault(note: Dict[str, Any]) -> Optional[str]:
     }
     frontmatter_yaml = yaml.dump(frontmatter, allow_unicode=True, sort_keys=False)
     markdown_body = note.get("content", "")
+
+    # Gallery: embed every attached image at the top of the note (Obsidian
+    # resolves `![[filename]]` from anywhere in the vault).
+    attachments = note.get("attachments") or []
+    if attachments:
+        gallery = "\n".join(
+            f"![[{Path(a).name}]]" for a in attachments
+        )
+        markdown_body = f"{gallery}\n\n{markdown_body}"
+
     full_note = f"---\n{frontmatter_yaml}---\n\n{markdown_body}\n"
 
     try:

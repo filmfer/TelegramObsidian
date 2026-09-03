@@ -7,7 +7,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -431,8 +431,10 @@ async def _document_image_job(update, context, document, status):
         if not extracted:
             await status.fail("Could not read any content from this image.")
             return
+        prev_model = get_current_model()
+        attachments = [attachment_rel] if attachment_rel else []
         await status.update("🧠 Interpreting image content…")
-        await analyze_and_save(
+        result = await analyze_and_save(
             update,
             context,
             extracted,
@@ -441,9 +443,13 @@ async def _document_image_job(update, context, document, status):
             source_type="image",
             source_kind="image",
             attachment=attachment_rel,
+            attachments=attachments,
             fingerprint=fingerprint,
             force=force,
         )
+        if get_current_model() != prev_model:
+            set_current_model(prev_model)
+            logger.info("Restored previous text model after image note: %s", prev_model)
 
 
 async def _document_job(update, file_obj, caption, detail_level, status):
@@ -1173,6 +1179,16 @@ def _save_attachment(local_path: str):
         return None
 
 
+def _save_attachments(local_paths) -> list:
+    """Copy every original file into Attachments; returns vault-relative paths."""
+    out = []
+    for p in local_paths:
+        rel = _save_attachment(p)
+        if rel:
+            out.append(rel)
+    return out
+
+
 async def _save_book_note(update, context, book_meta, detail_level="book", source="",
                           attachment=None, fingerprint: str = "", force: bool = False):
     """Launch background deep-processing of an e-book (map-reduce over sections)."""
@@ -1355,6 +1371,7 @@ async def analyze_and_save(
     attachment=None, source_kind=None,
     fingerprint: str = "", force: bool = False,
     thumbnail: str = "",
+    attachments: Optional[List[str]] = None,
 ):
     """Run AI analysis and persist the resulting knowledge note.
 
@@ -1394,6 +1411,8 @@ async def analyze_and_save(
     note_dict["source"] = source
     note_dict["source_type"] = source_type
     note_dict["attachment"] = attachment
+    if attachments:
+        note_dict["attachments"] = list(attachments)
     if thumbnail:
         note_dict["thumbnail"] = thumbnail
         note_dict["content"] = f"![[{thumbnail}]]\n\n{note_dict.get('content', '')}"
@@ -1610,6 +1629,11 @@ ALBUM_HOLD_SECONDS = 3
 _album_buffers: dict = {}
 
 
+def _wants_image_analysis(caption: str) -> bool:
+    """/image caption command → detailed analysis like the link flow."""
+    return bool(caption) and caption.strip().lower().startswith("/image")
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Photo/screenshot → LLM vision (extract text+diagrams) → OCR fallback → note."""
     media_group_id = update.message.media_group_id
@@ -1712,19 +1736,26 @@ async def _photo_job(update, context, messages, status, caption: str = ""):
         if not caption and messages:
             caption = messages[0].caption or ""
         force = _wants_force(caption)
+        # /image caption command → force the detailed-analysis flow (like links)
+        image_cmd = _wants_image_analysis(caption)
         if await _reject_duplicate(update, fingerprint, force):
             return
 
         attachment_rel = _save_attachment(paths[0]) if len(paths) == 1 else None
         detail = derive_detail_level(caption) if caption else "detailed"
+        if image_cmd:
+            detail = "detailed"
 
         # --- HANDWRITTEN route (v1.10, DEV): verbatim transcription, no summarization ---
         if detail == "handwritten":
             await _handwritten_job(update, context, paths, status, fingerprint, force)
             return
 
+        # Snapshot the active TEXT model — /image uses vision models (free chain
+        # → paid Gemini) and must leave the user's model choice untouched.
+        prev_model = get_current_model()
         try:
-            extracted = await vision_extract(paths)
+            extracted = await vision_extract(paths, detailed=image_cmd)
         except Exception as e:
             logger.error("Vision extraction failed for %d image(s): %s",
                          len(paths), e, exc_info=True)
@@ -1738,9 +1769,12 @@ async def _photo_job(update, context, messages, status, caption: str = ""):
             return
         source_name = Path(paths[0]).name
         source_label = "photograph" if len(paths) == 1 else f"album of {len(paths)} photos"
+        # Attach ALL originals to the note (gallery embeds in Obsidian)
+        attachment_rel = None
+        attachments = _save_attachments(paths)
 
     await status.update("🧠 Interpreting image content…")
-    await analyze_and_save(
+    result = await analyze_and_save(
         update,
         context,
         extracted,
@@ -1748,10 +1782,15 @@ async def _photo_job(update, context, messages, status, caption: str = ""):
         source=f"telegram-{source_label}::{source_name}",
         source_type="image",
         source_kind="image",
-        attachment=attachment_rel,
+        attachment=attachments[0] if attachments else None,
+        attachments=attachments,
         fingerprint=fingerprint,
         force=force,
     )
+    # Restore the model that was active before the /image vision chain ran
+    if get_current_model() != prev_model:
+        set_current_model(prev_model)
+        logger.info("Restored previous text model after /image: %s", prev_model)
 
 
 async def _handwritten_job(update, context, paths, status, fingerprint, force):

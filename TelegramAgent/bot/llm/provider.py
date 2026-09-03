@@ -398,6 +398,24 @@ def default_vision_model() -> str:
     return _VISION_BY_PROVIDER[0][1]  # last resort — will fail if no key
 
 
+def vision_fallback_chain() -> List[str]:
+    """Ordered vision models: VISION_MODEL override first, then FREE tiers,
+    then the user's paid Gemini (vision-capable) as the last automatic fallback.
+    Only providers with credentials are included.
+    """
+    chain: List[str] = []
+    override = os.getenv("VISION_MODEL", "").strip()
+    if override:
+        chain.append(override)
+    for prefix, model in _VISION_BY_PROVIDER:
+        if _provider_ready(prefix) and model not in chain:
+            chain.append(model)
+    # user's paid Gemini — vision-capable, used only after the free tiers fail
+    if _provider_ready("gemini") and "gemini/gemini-2.0-flash" not in chain:
+        chain.append("gemini/gemini-2.0-flash")
+    return chain or [default_vision_model()]
+
+
 async def chat_vision(
     system_prompt: str,
     user_content: str,
@@ -406,40 +424,47 @@ async def chat_vision(
 ) -> Optional[tuple]:
     """Vision completion: text + one or more base64 data-URI images via litellm.
 
-    Uses VISION_MODEL (or auto-picked free vision model). Returns
-    ``(text, {"model": ...})`` on success, ``None`` on any failure (no key,
-    provider error, empty response). Callers fall back to OCR.
+    Tries every model in ``vision_fallback_chain()`` (VISION_MODEL override →
+    free tiers → user's paid Gemini). The caller's active TEXT model is never
+    touched — vision calls are stateless. Returns ``(text, {"model": ...})``
+    on success, ``None`` when every candidate failed. Callers fall back to OCR.
     """
     import litellm
 
-    model = default_vision_model()
+    chain = vision_fallback_chain()
     content: List[Dict[str, Any]] = [{"type": "text", "text": user_content}]
     for uri in image_data_uris:
         content.append({"type": "image_url", "image_url": {"url": uri}})
 
-    try:
-        response = await litellm.acompletion(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content},
-            ],
-            temperature=0.2,
-            max_tokens=max_tokens,
-            num_retries=0,
-            timeout=120,
-        )
-        text = (response.choices[0].message.content or "").strip()
-        if not text:
-            logger.warning("Vision model '%s' returned empty content", model)
-            return None
-        return text, {"model": model}
-    except Exception as e:
-        logger.error(
-            "Vision completion failed on '%s': %s [%s]",
-            model, e, type(e).__name__, exc_info=True,
-        )
-        return None
+    last_error: Optional[Exception] = None
+    for model in chain:
+        try:
+            response = await litellm.acompletion(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": content},
+                ],
+                temperature=0.2,
+                max_tokens=max_tokens,
+                num_retries=0,
+                timeout=180,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            if not text:
+                logger.warning("Vision model '%s' returned empty content", model)
+                last_error = ValueError("empty vision response")
+                continue
+            logger.info("Vision extraction succeeded with '%s'", model)
+            return text, {"model": model}
+        except Exception as e:
+            last_error = e
+            logger.error(
+                "Vision completion failed on '%s': %s [%s]",
+                model, e, type(e).__name__, exc_info=True,
+            )
+    logger.error("All vision models failed (%s); chain=%s", last_error, chain)
+    return None
 
 def _set_catalog(catalog: Dict[str, List[str]]) -> None:
     cfg = _load_config()

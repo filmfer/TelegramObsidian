@@ -67,44 +67,68 @@ def ocr_image(path: str) -> str:
 async def vision_extract(
     image_paths: List[str],
     prompt_topic: str = "image",
+    detailed: bool = False,
 ) -> Optional[str]:
     """Best-effort transcription of one or more images into structured text.
 
-    - Tries ``chat_vision`` (LLM capable of image input, VISION_MODEL) first.
+    - Tries ``chat_vision`` (LLM capable of image input; free tiers → paid
+      Gemini fallback) first. Sets larger than ``VISION_MAX_IMAGES_PER_CALL``
+      are processed in chunks and merged.
     - On failure/empty response falls back to Tesseract OCR (each image merged).
     Returns combined text ('' if everything failed) — callers surface a
     meaningful error if even OCR produced nothing.
     """
+    import os as _os
+
     from llm.provider import chat_vision  # lazy: avoids import cycles
 
-    if image_paths:
-        try:
-            data_uris = [image_to_base64_data_uri(p) for p in image_paths]
-        except Exception as e:
-            logger.error("Image prep failed: %s", e)
-            data_uris = []
+    max_per_call = max(1, int(_os.getenv("VISION_MAX_IMAGES_PER_CALL", "4")))
 
-        if data_uris:
-            system = (
-                "You extract ALL readable information from the provided image/s. "
-                "Images often contain diagrams, boxes, bullet lists and schemas. "
-                "Transcribe every piece of text, then add a short section describing "
-                "any diagrams/relationships you can infer. Preserve bullet structure "
-                "with '-' lines. Be exhaustive, do not paraphrase away details."
-            )
-            prompt = (
-                f"Extract the complete content from this {prompt_topic} as structured "
-                "Markdown. Keep the labels of boxes/diagrams and their grouping."
-            )
-            result = await chat_vision(system, prompt, data_uris)
-            text = (result or "").strip() if result else ""
-            if text:
-                logger.info(
-                    "Vision LLM extracted %d chars across %d image(s)",
-                    len(text),
-                    len(image_paths),
+    if image_paths:
+        chunks = [
+            image_paths[i : i + max_per_call]
+            for i in range(0, len(image_paths), max_per_call)
+        ]
+        try:
+            parts: List[str] = []
+            for n, chunk in enumerate(chunks, 1):
+                data_uris = [image_to_base64_data_uri(p) for p in chunk]
+                system = (
+                    "You extract ALL readable information from the provided image/s. "
+                    "Images often contain diagrams, boxes, bullet lists and schemas. "
+                    "Transcribe every piece of text, then add a short section describing "
+                    "any diagrams/relationships you can infer. Preserve bullet structure "
+                    "with '-' lines. Be exhaustive, do not paraphrase away details."
                 )
-                return text
+                if detailed:
+                    system += (
+                        " Then produce a DETAILED ANALYSIS: main topic, every key "
+                        "fact/number, relationships between elements, and practical "
+                        "takeaways — as deep as a well-researched note."
+                    )
+                prompt = (
+                    f"Extract the complete content from this {prompt_topic} as structured "
+                    "Markdown. Keep the labels of boxes/diagrams and their grouping."
+                )
+                result = await chat_vision(system, prompt, data_uris)
+                text = result[0].strip() if result else ""
+                if text:
+                    if len(chunks) > 1:
+                        first = Path(chunk[0]).name
+                        last = Path(chunk[-1]).name
+                        parts.append(
+                            f"## Images {first} … {last}\n\n{text}"
+                        )
+                    else:
+                        parts.append(text)
+                    logger.info(
+                        "Vision LLM extracted %d chars from %d image(s) (chunk %d/%d)",
+                        len(text), len(chunk), n, len(chunks),
+                    )
+            if parts:
+                return "\n\n".join(parts)
+        except Exception as e:
+            logger.error("Vision extraction failed: %s", e, exc_info=True)
 
     # ---- Fallback: local OCR (offline, free) ----
     if VISION_STORE_FALLBACK_TO_OCR:

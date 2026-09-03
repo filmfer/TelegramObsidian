@@ -229,6 +229,30 @@ are routed here automatically by MIME type.
 
 **Config:** `VISION_MODEL` (optional override) in `.env`.
 
+### 🖼️ `/image` — detailed image analysis with original gallery (v1.11)
+
+**Use:** send one photo (or an album) with the caption **`/image`** — optionally with
+extra words (`/image explicar`). The bot produces a **detailed analysis note like the
+link flow** (extraction + interpretation, not just transcription) and embeds **every
+original image** at the top of the note as an Obsidian gallery (`![[file.jpg]]`),
+with all files copied to `90_Attachments/` and listed in the frontmatter.
+
+**How it works:** `handle_photo` → `_photo_job` → `vision_extract(detailed=True)`:
+1. Album members aggregate into one event; `/image` forces `detail=detailed`.
+2. `vision_extract` chunks the set (≤ `VISION_MAX_IMAGES_PER_CALL`, default 4 per
+   call — 19-image sets become 5 calls) and merges chunk outputs with
+   `## Images A … B` headers, so huge albums don't blow the context window.
+3. **Vision fallback chain** (`vision_fallback_chain()`): `VISION_MODEL` override →
+   **free tiers** (`zai/glm-4v-flash` → Groq llama-vision → OpenRouter qwen-vl) →
+   **your paid Gemini** (`gemini/gemini-2.0-flash`) as the last automatic fallback.
+   Every attempt is logged with the model used; Tesseract OCR remains the offline
+   last resort if every vision model fails.
+4. **Model restore guarantee:** the active TEXT model is snapshotted before the
+   vision run and restored after the note is written — `/image` never changes
+   which model handles your next link, document or text.
+5. Note written via `write_note_to_vault` with `attachments: [...]` frontmatter +
+   gallery embeds; dedup, `--force`, error surfacing and 10-min deadline all apply.
+
 ### ✍️ Handwritten notes — pt-PT (v1.10, ⚠️ UNDER DEVELOPMENT)
 
 > **Warning:** this feature is still in development — accuracy depends heavily on
@@ -478,6 +502,7 @@ or when quota runs out — no unsolicited check messages.
 - [x] v1.9 — Image & album ingestion: LLM vision (free `zai/glm-4v-flash` / Groq llama-vision / OpenRouter qwen-vl) with Tesseract OCR fallback; album fusion into one note; audio/* documents routed to `/voice`; `/research` & video summarization never fail silently (quota/rate-limit errors surface with the exact provider message)
 - [ ] v1.10 (in development) — Handwritten notes (pt-PT): verbatim transcription via vision LLM + Tesseract-por fallback, `[?]` for illegible words, `/learn` few-shot training loop that adapts to the user's handwriting
 - [x] v1.10.1 — Production hardening: 20MB download pre-checks with exact-size messages · YouTube URL normalization (m./music./embed/live/shorts, any param order) + manual→auto→translated caption fallback · queue items cleared atomically by ID on success **or** duplicate (no more stuck queues) · targeted image/vision error messages with full tracebacks · album-aware rate limiting (one aggregated event, one warning max, plain-text batching exempt)
+- [x] v1.11 — `/image` command: detailed image analysis like the link flow + gallery of all original images embedded in the note; vision fallback chain (free tiers → paid Gemini) with chunked processing for large sets (≤ `VISION_MAX_IMAGES_PER_CALL` per call); active text model snapshotted and restored; fixed vision tuple bug that broke all image notes
 - [ ] Semantic search over the vault (`/search <query>`)
 - [ ] Weekly review notes
 
