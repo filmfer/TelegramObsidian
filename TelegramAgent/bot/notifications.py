@@ -83,21 +83,29 @@ async def run_with_deadline(status: StatusMessage, coro: Any) -> Any:
 
 
 def setup_error_logging() -> None:
-    """Add a rotating file handler so every traceback reaches logs/bot.log."""
+    """Add rotating file + stdout handlers so logs reach both logs/bot.log
+    and `docker compose logs` (INFO and up)."""
     log_dir = Path(os.getenv("LOG_DIR", "logs"))
+    fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(
+        fh = RotatingFileHandler(
             log_dir / "bot.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8"
         )
+        fh.setFormatter(fmt)
+        fh.setLevel(logging.INFO)
+        root.addHandler(fh)
     except OSError as e:
         logger.warning("Could not open log file: %s — file logging disabled", e)
-        return
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    )
-    handler.setLevel(logging.INFO)
-    logging.getLogger().addHandler(handler)
+    # stdout: makes `docker compose logs` show INFO+ (ops visibility)
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler)
+               for h in root.handlers):
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        sh.setLevel(logging.INFO)
+        root.addHandler(sh)
 
 
 async def on_error(update: object, context) -> None:
