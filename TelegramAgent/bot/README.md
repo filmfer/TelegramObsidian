@@ -90,7 +90,7 @@ and `BOOK_FULLTEXT` in `.env`.
 | Command | Action |
 |---|---|
 | `/text` | Turn every queued text message into **one** note |
-| `/voice` | Transcribe every queued audio into **one** note |
+| `/voice` · `/audio` | **One function, two names** — transcribe every queued audio into **one** note; as a **caption** on a voice message or audio file it transcribes immediately (identical for both) |
 | `/queue` | See what's waiting (items expire after `PENDING_QUEUE_TTL_HOURS`, default 24h) |
 | `/disk` | Check vault disk usage & warnings if space < 20% |
 | `/research <topic>` | Deep web research with cited sources |

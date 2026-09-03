@@ -336,14 +336,26 @@ now always allowed.
 
 ### 🗣️ Voice notes & audio · 💭 Plain-text thoughts
 
-**Use:** send voice messages or audio files — they queue silently; run `/voice` to
-transcribe them all into **one** note. Send text thoughts — queue them, run `/text` to
-merge into one structured note. `/queue` shows what's waiting (items expire after
-`PENDING_QUEUE_TTL_HOURS`, default 24h). Caption `research` on a voice note = instant
-deep search on the transcript.
+**Use — one unified flow (`/voice` · `/audio`):** send a **voice message** (hold to
+record in Telegram) **or attach an audio file** (`mp3/wav/m4a/ogg`…). They behave
+exactly the same:
+
+- **Immediate:** add the caption **`/voice` or `/audio`** on the message itself → it
+  transcribes **right away** (`🎙️ Transcribing audio…`) and creates the note.
+- **Batched:** no caption → it goes into the queue; later `/voice` (alias `/audio`)
+  transcribes everything queued into **one** note. `/queue` shows what's waiting
+  (items expire after `PENDING_QUEUE_TTL_HOURS`, default 24h).
+- Caption `research` on a voice note = instant deep search on the transcript.
+
+The two commands are **the same function** — there is no distinction between the
+recorded voice message and the uploaded audio file anymore; both use identical
+handlers and both accept the caption for immediate processing.
 
 **How it works:** queues persist in SQLite (survive restarts). Transcription uses Groq's
-free `whisper-large-v3` (300 s timeout); oversized audio (> `AUDIO_MAX_GROQ_MB`) goes
+free `whisper-large-v3` (300 s timeout); files Groq would reject with an
+`HTTP 400` (e.g. some `.ogg`/`.opus` Opus containers) are **auto-converted to MP3 with
+ffmpeg** before being sent, and the real API response body is shown in errors so a
+recurring failure is easy to diagnose. Oversized audio (> `AUDIO_MAX_GROQ_MB`) goes
 through the same ffmpeg segmentation as YouTube Layer 3, and `faster-whisper` (CPU, int8)
 is the final local fallback — the pipeline always ends in a note.
 
@@ -504,6 +516,8 @@ or when quota runs out — no unsolicited check messages.
 - [ ] v1.10 (in development) — Handwritten notes (pt-PT): verbatim transcription via vision LLM + Tesseract-por fallback, `[?]` for illegible words, `/learn` few-shot training loop that adapts to the user's handwriting
 - [x] v1.10.1 — Production hardening: 20MB download pre-checks with exact-size messages · YouTube URL normalization (m./music./embed/live/shorts, any param order) + manual→auto→translated caption fallback · queue items cleared atomically by ID on success **or** duplicate (no more stuck queues) · targeted image/vision error messages with full tracebacks · album-aware rate limiting (one aggregated event, one warning max, plain-text batching exempt)
 - [x] v1.11 — `/image` command: detailed image analysis like the link flow + gallery of all original images embedded in the note; vision fallback chain (free tiers → paid Gemini) with chunked processing for large sets (≤ `VISION_MAX_IMAGES_PER_CALL` per call); active text model snapshotted and restored; fixed vision tuple bug that broke all image notes
+- [x] v1.11.8 — `/audio` added as alias of `/voice`; caption `/voice`/`/audio` on a voice message or audio file transcribes **immediately**; robust audio download with retry + memory fallback and honest errors
+- [x] v1.11.9 — **`/voice` · `/audio` unified** (one function, two names — recorded voice notes and attached audio files share the same handlers); **Groq HTTP 400 fixed**: `.ogg`/`.opus`/risky containers are auto-converted to MP3 via ffmpeg before upload, and errors now expose the API response body
 - [ ] Semantic search over the vault (`/search <query>`)
 - [ ] Weekly review notes
 
