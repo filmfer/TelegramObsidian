@@ -1,6 +1,7 @@
 """Telegram → Gemini → Obsidian Knowledge Agent."""
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -405,12 +406,15 @@ async def _queue_document_as_voice(update, context):
         status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
         item = {
             "id": 0,
-            "content": str(local_path),
+            "content": _staging_content(str(local_path), getattr(media, "file_id", "")),
             "received_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         await run_with_deadline(status, _voice_queue_job(update, context, [item], status))
         return
-    n = await asyncio.to_thread(pending_add, chat_id, "voice", str(local_path))
+    n = await asyncio.to_thread(
+        pending_add, chat_id, "voice",
+        _staging_content(str(local_path), getattr(media, "file_id", "")),
+    )
     await update.message.reply_text(
         f"🎙️ Audio queued ({n} in the queue).\n"
         "Keep sending more, or /voice to transcribe and create the note."
@@ -641,6 +645,9 @@ async def text_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result is TIMEOUT:
             logger.warning("Queue[text] chat=%s: timed out — items kept for retry", chat_id)
             return
+        if not result:
+            logger.warning("Queue[text] chat=%s: no note produced — items kept", chat_id)
+            return
         # Success (True) or duplicate ("duplicate") → items are fully handled.
         deleted = await asyncio.to_thread(pending_delete, ids)
         logger.info(
@@ -682,6 +689,10 @@ async def voice_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if result is TIMEOUT:
             logger.warning("Queue[voice] chat=%s: timed out — items kept for retry", chat_id)
             return
+        if not result:
+            # Nothing was transcribed (or write failed) — keep items for retry.
+            logger.warning("Queue[voice] chat=%s: no transcription produced — items kept", chat_id)
+            return
         # Success (True) or duplicate ("duplicate") → items are fully handled.
         deleted = await asyncio.to_thread(pending_delete, ids)
         logger.info(
@@ -697,19 +708,46 @@ async def voice_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await status.fail(f"Could not create the note: {e}")
 
 async def _voice_queue_job(update, context, items, status):
-    """Transcribe queued audio files sequentially, then build a merged note."""
+    """Transcribe queued audio files sequentially, then build a merged note.
+
+    Each item's content may be a plain path (legacy) or JSON with
+    {"path": ..., "file_id": ...}. If the local file is gone, the bot
+    re-downloads it from Telegram via file_id so a container restart or
+    volume rebuild can never turn queued audio into "missing files".
+    """
     transcripts = []
+    any_transcribed = False
     for i, item in enumerate(items, 1):
-        path = item["content"]
-        if not Path(path).is_file():
-            transcripts.append(f"[{item['received_at']}]\n(staging file missing — skipped)")
-            continue
+        path, file_id = _staging_entry(item.get("content", ""))
+        if not path or not Path(path).is_file():
+            re_path = await _redownload_staging(update, context, file_id, i)
+            if re_path:
+                path = re_path
+            else:
+                transcripts.append(
+                    f"[{item.get('received_at', '?')}]\n"
+                    "(staging file missing and not re-downloadable)"
+                )
+                continue
         try:
             await status.update(f"🎙️ Transcribing audio {i}/{len(items)}…")
-            transcripts.append(f"[{item['received_at']}]\n{await transcribe_audio(path)}")
+            text = await transcribe_audio(path)
+            if text and text.strip():
+                any_transcribed = True
+            transcripts.append(f"[{item.get('received_at', '?')}]\n{text}")
         except TranscriptionError as e:
             logger.error(f"Queued audio {i} transcription failed: {e}")
-            transcripts.append(f"[{item['received_at']}]\n(transcription failed: {e})")
+            transcripts.append(
+                f"[{item.get('received_at', '?')}]\n(transcription failed: {e})"
+            )
+
+    # Never create a bogus "missing staging files" note.
+    if not any_transcribed:
+        await status.fail(
+            "None of the queued audio could be transcribed — the files are "
+            "unavailable and could not be re-downloaded. Send the audio again."
+        )
+        return False
 
     combined = "\n\n---\n\n".join(transcripts)[:12000]
     detail = context.user_data.get("detail_level", "detailed")
@@ -725,8 +763,11 @@ async def _voice_queue_job(update, context, items, status):
     # Cleanup staging files ONLY if success
     if result:
         for item in items:
+            p, _ = _staging_entry(item.get("content", ""))
+            if not p:
+                continue
             try:
-                Path(item["content"]).unlink(missing_ok=True)
+                Path(p).unlink(missing_ok=True)
             except OSError as e:
                 logger.warning("Could not delete staging file: %s", e)
     return result
@@ -905,7 +946,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = StatusMessage(await update.message.reply_text("🎙️ Transcribing audio…"))
         item = {
             "id": 0,
-            "content": str(local_path),
+            "content": _staging_content(str(local_path), getattr(media, "file_id", "")),
             "received_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         await run_with_deadline(
@@ -913,7 +954,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    n = await asyncio.to_thread(pending_add, chat_id, "voice", str(local_path))
+    n = await asyncio.to_thread(
+        pending_add, chat_id, "voice",
+        _staging_content(str(local_path), getattr(media, "file_id", "")),
+    )
     await update.message.reply_text(
         f"🎙️ Audio queued ({n} in the queue).\n"
         "Keep sending more, or /voice to transcribe and create the note."
@@ -1670,6 +1714,46 @@ _album_buffers: dict = {}
 def _wants_image_analysis(caption: str) -> bool:
     """/image caption command → detailed analysis like the link flow."""
     return bool(caption) and caption.strip().lower().startswith("/image")
+
+
+def _staging_content(path: str, file_id: str = "") -> str:
+    """Encode a voice queue entry: local path + optional Telegram file_id.
+
+    Storing the file_id lets /voice re-download the audio from Telegram if
+    the staging file vanished (container restart, volume rebuild, cleanup).
+    """
+    if file_id:
+        return json.dumps({"path": path, "file_id": file_id}, ensure_ascii=False)
+    return path
+
+
+def _staging_entry(content: str):
+    """Parse a queue `content` back into (local_path, file_id)."""
+    if isinstance(content, str) and content.strip().startswith("{"):
+        try:
+            obj = json.loads(content)
+            if isinstance(obj, dict):
+                return obj.get("path"), obj.get("file_id")
+        except Exception:
+            pass
+    return content, None
+
+
+async def _redownload_staging(update, context, file_id: str, index: int) -> Optional[str]:
+    """Re-download a missing queued audio from Telegram by file_id."""
+    if not file_id:
+        return None
+    chat_id = update.effective_chat.id
+    staging = STAGING_DIR / str(chat_id)
+    try:
+        staging.mkdir(parents=True, exist_ok=True)
+        file_obj = await context.bot.get_file(file_id)
+        p = await file_obj.download_to_drive(staging)
+        logger.info("Re-downloaded missing staging file %d: %s", index, Path(p).name)
+        return str(p)
+    except Exception as e:
+        logger.error("Could not re-download staging file %d: %s", index, e, exc_info=True)
+        return None
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):

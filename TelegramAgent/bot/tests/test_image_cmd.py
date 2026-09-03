@@ -174,6 +174,11 @@ def main():
     check("audio download uses robust helper",
           "_download_telegram_file(media, staging" in src_text)
 
+    # 8. staging content round-trip (path + file_id) for the /voice queue
+    enc = bot._staging_content("/app/data/staging/5/abc.oga", "AwAd-123")
+    p, fid = bot._staging_entry(enc)
+    check("staging JSON stores path and file_id", p == "/app/data/staging/5/abc.oga" and fid == "AwAd-123")
+    check("legacy plain-path content still parses", bot._staging_entry("/x/a.oga") == ("/x/a.oga", None))
     print(f"\n{sum(1 for _, ok in results if ok)}/{len(results)} checks passed")
     return 0 if all(ok for _, ok in results) else 1
 

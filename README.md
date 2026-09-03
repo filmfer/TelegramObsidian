@@ -351,13 +351,18 @@ The two commands are **the same function** — there is no distinction between t
 recorded voice message and the uploaded audio file anymore; both use identical
 handlers and both accept the caption for immediate processing.
 
-**How it works:** queues persist in SQLite (survive restarts). Transcription uses Groq's
+**How it works:** queues persist in SQLite (survive restarts). Each queued audio
+remembers its Telegram `file_id`, so if the local staging file ever disappears
+(container restart, volume rebuild) the bot **re-downloads it automatically**
+instead of skipping it. Transcription uses Groq's
 free `whisper-large-v3` (300 s timeout); files Groq would reject with an
 `HTTP 400` (e.g. some `.ogg`/`.opus` Opus containers) are **auto-converted to MP3 with
 ffmpeg** before being sent, and the real API response body is shown in errors so a
 recurring failure is easy to diagnose. Oversized audio (> `AUDIO_MAX_GROQ_MB`) goes
 through the same ffmpeg segmentation as YouTube Layer 3, and `faster-whisper` (CPU, int8)
-is the final local fallback — the pipeline always ends in a note.
+is the final local fallback — the pipeline always ends in a note. If every queued file
+is unavailable even after re-download, the bot says so explicitly instead of creating
+an empty "missing files" note.
 
 ### 🔎 `/research <topic>`
 
