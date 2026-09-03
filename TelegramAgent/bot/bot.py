@@ -1684,6 +1684,10 @@ async def _buffer_album_photo(update, context, photo, media_group_id):
         {"messages": [], "caption": "", "task": None, "context": context},
     )
     buf["messages"].append(update.message)
+    # Keep the full Update (has effective_chat / .message.reply_text) — the
+    # album job must reply with a real Update, not a bare Message.
+    if "first_update" not in buf:
+        buf["first_update"] = update
     if update.message.caption:
         buf["caption"] = update.message.caption
     logger.info(
@@ -1713,7 +1717,11 @@ async def _process_album(media_group_id):
     buf = _album_buffers.pop(media_group_id, None)
     if not buf or not buf["messages"]:
         return
-    update = buf["messages"][0]
+    update = buf.get("first_update") or buf["messages"][0]
+    if not hasattr(update, "effective_chat"):
+        # Legacy buffer without the full Update — rebuild the chat reply target.
+        logger.error("Album %s has no first_update; cannot reply", media_group_id)
+        return
     logger.info(
         "Album %s processing started (%d images, caption=%r)",
         media_group_id, len(buf["messages"]), buf["caption"][:40],

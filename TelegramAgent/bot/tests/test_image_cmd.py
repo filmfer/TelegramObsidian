@@ -148,7 +148,9 @@ def main():
 
     fake_update = SimpleNamespace(message=FakeMsg2(), effective_chat=FakeChat())
     bot._album_buffers["mg-test"] = {
-        "messages": [fake_update], "caption": "",
+        "messages": [SimpleNamespace(photo=[SimpleNamespace()], caption="")],
+        "first_update": fake_update,
+        "caption": "",
         "task": None, "context": None,
     }
 
