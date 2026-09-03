@@ -321,6 +321,12 @@ async def _rate_limited_reply(update: Update, user_id: int) -> bool:
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document if update.message else None
+    logger.info(
+        "Received DOCUMENT: mime=%s size=%s media_group=%s",
+        getattr(doc, "mime_type", None), getattr(doc, "file_size", None),
+        getattr(update.message, "media_group_id", None),
+    )
     user_id = update.effective_user.id if update.effective_user else 0
     if await _rate_limited_reply(update, user_id):
         return
@@ -843,6 +849,7 @@ async def _text_note_job(update, context, text, detail, status):
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Voice/audio is queued for /voice; captions with 'research' run instantly."""
+    logger.info("Received VOICE/AUDIO update")
     user_id = update.effective_user.id if update.effective_user else 0
     if await _rate_limited_reply(update, user_id):
         return
@@ -1612,6 +1619,10 @@ def main():
 
 
 async def handle_unsupported(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(
+        "Received UNSUPPORTED update: %s",
+        (update.message.to_dict() if update.message else "?"),
+    )
     """Reply to content types the bot can't process yet (stickers, GIFs…)."""
     if update.message and not update.message.text:
         await update.message.reply_text(
@@ -1634,6 +1645,11 @@ def _wants_image_analysis(caption: str) -> bool:
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Photo/screenshot → LLM vision (extract text+diagrams) → OCR fallback → note."""
+    logger.info(
+        "Received PHOTO: media_group=%s sizes=%s",
+        update.message.media_group_id if update.message else None,
+        [p.file_size for p in (update.message.photo or [])],
+    )
     media_group_id = update.message.media_group_id
     if media_group_id:
         # Album members are aggregated into ONE event — no per-photo rate limit,
