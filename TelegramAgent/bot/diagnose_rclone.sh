@@ -58,13 +58,26 @@ echo ""
 # 3. rclone mount process
 # =============================================================================
 echo "--- 3. rclone mount process ---"
-RCLONE_PID=$(pgrep -f "rclone mount" 2>/dev/null | head -1 || echo "")
-if [ -n "$RCLONE_PID" ]; then
-    check_pass "rclone mount running (PID: $RCLONE_PID)"
-    MOUNT_POINT=$(ps aux | grep "rclone mount" | grep -v grep | sed -E 's/.*rclone mount [^ ]+ ([^ ]+).*/\1/')
-    check_info "Mount point: $MOUNT_POINT"
+RCLONE_PIDS=$(pgrep -f "rclone mount" 2>/dev/null || echo "")
+if [ -n "$RCLONE_PIDS" ]; then
+    check_pass "rclone mount running (PIDs: $(echo $RCLONE_PIDS | tr '\n' ' '))"
+    # Extract mount points from /proc to avoid ps parsing issues
+    MOUNT_POINTS=""
+    for pid in $RCLONE_PIDS; do
+        if [ -f "/proc/$pid/cmdline" ]; then
+            CMD=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+            # Extract path after "rclone mount <remote>"
+            MP=$(echo "$CMD" | sed -E 's/.*rclone mount [^ ]+ ([^ ]+).*/\1/' | tr -d '[:space:]')
+            if [ -n "$MP" ]; then
+                MOUNT_POINTS="$MOUNT_POINTS $MP"
+            fi
+        fi
+    done
+    MOUNT_POINTS=$(echo "$MOUNT_POINTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+    check_info "Mount points: $MOUNT_POINTS"
 else
     check_fail "rclone mount NOT running"
+    MOUNT_POINTS=""
 fi
 echo ""
 
@@ -72,9 +85,9 @@ echo ""
 # 4. Mount point verification
 # =============================================================================
 echo "--- 4. Mount point check ---"
-MOUNT_INFO=$(mount | grep -E 'rclone|obsidian|vault' || echo "")
+MOUNT_INFO=$(mount | grep -E 'rclone|fuse.rclone' || echo "")
 if echo "$MOUNT_INFO" | grep -q .; then
-    check_pass "Mount active:"
+    check_pass "Mount(s) active:"
     echo "$MOUNT_INFO" | sed 's/^/  /'
 else
     check_fail "No vault mount found"
@@ -114,13 +127,33 @@ echo ""
 echo "--- 7. Docker bind mount ---"
 MOUNTS=$(docker inspect obsidian-agent --format '{{json .Mounts}}' 2>/dev/null || echo "[]")
 if echo "$MOUNTS" | grep -q '/data/vault'; then
-    VAULT_SRC=$(echo "$MOUNTS" | python3 -c "import sys,json; m=json.load(sys.stdin); print([x['Source'] for x in m if x.get('Destination')=='/data/vault'][0])" 2>/dev/null || echo "unknown")
+    VAULT_SRC=$(echo "$MOUNTS" | python3 -c "
+import sys, json
+m = json.load(sys.stdin)
+for x in m:
+    if x.get('Destination') == '/data/vault':
+        print(x['Source'])
+        break
+" 2>/dev/null || echo "unknown")
     check_pass "Vault bind mount: $VAULT_SRC → /data/vault"
     
-    if [ -n "$MOUNT_POINT" ] && [ "$VAULT_SRC" != "$MOUNT_POINT" ]; then
-        check_fail "PATH MISMATCH! Docker mount is $VAULT_SRC but rclone is at $MOUNT_POINT"
-    elif [ -n "$MOUNT_POINT" ]; then
-        check_pass "Paths match correctly"
+    # Check if Docker mount source matches any rclone mount point
+    MOUNT_MATCH=0
+    for mp in $MOUNT_POINTS; do
+        if [ "$VAULT_SRC" = "$mp" ]; then
+            MOUNT_MATCH=1
+            break
+        fi
+    done
+    
+    if [ -n "$MOUNT_POINTS" ]; then
+        if [ "$MOUNT_MATCH" -eq 1 ]; then
+            check_pass "Paths match correctly ($VAULT_SRC)"
+        else
+            check_fail "PATH MISMATCH! Docker mount is '$VAULT_SRC' but rclone is at: $MOUNT_POINTS"
+        fi
+    else
+        check_warn "Cannot verify path match (no rclone mount detected)"
     fi
 else
     check_fail "No vault bind mount found in container"
