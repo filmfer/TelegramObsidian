@@ -368,9 +368,17 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     status = StatusMessage(await update.message.reply_text("🔄 Processing document…"))
-    await run_with_deadline(
-        status, _document_job(update, document, caption, detail_level, status)
-    )
+    try:
+        await run_with_deadline(
+            status, _document_job(update, context, document, caption, detail_level, status)
+        )
+    except Exception as e:
+        logger.error("Document processing failed: %s", e, exc_info=True)
+        await status.fail(
+            "Something went wrong while processing this document. "
+            "The error was logged. Try sending it again — if it keeps failing, "
+            "run /models to check AI providers."
+        )
 
 
 async def _queue_document_as_voice(update, context):
@@ -471,7 +479,7 @@ async def _document_image_job(update, context, document, status):
             logger.info("Restored previous text model after image note: %s", prev_model)
 
 
-async def _document_job(update, document, caption, detail_level, status):
+async def _document_job(update, context, document, caption, detail_level, status):
     """Download → dedup-check → parse/book-route → analyze (under deadline)."""
     try:
         with tempfile.TemporaryDirectory() as tmp:
