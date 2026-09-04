@@ -213,13 +213,90 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/research <topic> — deep web research, cited sources\n"
         "Detail levels: /summarize /detailed /precise /raw /book /handwritten\n"
         "(handwritten = transcribe handwritten notes, pt-PT; /learn first to train)\n"
-                "LLM models: /models\n"
+        "LLM models: /models\n"
         "/disk — check vault disk space\n"
+        "/vault — verify vault sync health (rclone mount + write test)\n"
         "/organize preview — tidy sparse categories into broad ones (plan only)\n"
         "/organize — apply the proposed category merges (asks confirmation)\n"
         "/dashboard — rebuild the \"Recent Notes\" note (newest per category)\n\n"
         "Duplicates are detected automatically — send with '--force' to override."
     )
+
+
+async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check vault health: mount status, write access, disk space."""
+    import subprocess
+
+    chat_id = update.effective_chat.id
+    if chat_id != TELEGRAM_CHAT_ID:
+        return
+
+    await update.message.reply_text("🔍 Checking vault health…")
+
+    checks = []
+    healthy = True
+
+    # 1. Check vault is accessible
+    try:
+        result = subprocess.run(
+            ["ls", "-1", str(VAULT_PATH)],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            items = result.stdout.strip().split("\n")
+            checks.append(f"✅ Vault accessible ({len(items)} items)")
+        else:
+            checks.append("❌ Vault NOT accessible (Transport endpoint disconnected)")
+            healthy = False
+    except Exception as e:
+        checks.append(f"❌ Vault check failed: {e}")
+        healthy = False
+
+    # 2. Check write access
+    try:
+        test_file = VAULT_PATH / f".vault_check_{int(time.time())}.txt"
+        test_file.write_text("ok")
+        test_file.unlink()
+        checks.append("✅ Write test passed")
+    except Exception as e:
+        checks.append(f"❌ Write test failed: {e}")
+        healthy = False
+
+    # 3. Check disk space
+    try:
+        stat = os.statvfs(str(VAULT_PATH))
+        free_gb = (stat.f_bavail * stat.f_frsize) / (1024**3)
+        total_gb = (stat.f_blocks * stat.f_frsize) / (1024**3)
+        pct = (stat.f_blocks - stat.f_bavail) / stat.f_blocks * 100
+        checks.append(f"💾 Disk: {free_gb:.1f}GB free / {total_gb:.1f}GB total ({pct:.0f}% used)")
+        if free_gb < 1:
+            checks.append("⚠️ Low disk space!")
+            healthy = False
+    except Exception as e:
+        checks.append(f"⚠️ Disk check failed: {e}")
+
+    # 4. Count recent notes
+    try:
+        recent = 0
+        cutoff = time.time() - 86400  # 24h
+        for f in VAULT_PATH.rglob("*.md"):
+            if f.stat().st_mtime > cutoff:
+                recent += 1
+        checks.append(f"📝 Notes created (24h): {recent}")
+    except Exception:
+        pass
+
+    # Build response
+    status = "✅ HEALTHY" if healthy else "❌ ISSUES FOUND"
+    response = f"🏥 Vault Health: {status}\n\n" + "\n".join(checks)
+
+    if not healthy:
+        response += (
+            "\n\n🔧 Fix: restart container to refresh bind mount:\n"
+            "  docker compose restart"
+        )
+
+    await update.message.reply_text(response)
 
 
 async def set_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1746,6 +1823,7 @@ def main():
     app.add_handler(CommandHandler("help", start_command))
     app.add_handler(CommandHandler("models", models_command))
     app.add_handler(CommandHandler("disk", disk_command))
+    app.add_handler(CommandHandler("vault", vault_command))
     app.add_handler(CommandHandler("text", text_note_command))
     app.add_handler(CommandHandler("voice", voice_note_command))
     app.add_handler(CommandHandler("audio", voice_note_command))

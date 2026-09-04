@@ -72,6 +72,7 @@ Send with a caption or `/command`:
 | `/image` *(caption on a photo or album)* | **Detailed image analysis** like the link flow — every original image embedded as a gallery in the note; free vision models first, paid Gemini as automatic fallback; your active text model is restored afterwards |
 | `/queue` | See what's waiting in the queues |
 | `/disk` | Check vault disk usage & warnings if space < 20% |
+| `/vault` | Verify vault sync health — mount status, write test, disk space, recent notes |
 | `/research <topic>` | Deep web research with cited sources |
 | `/models` | List working LLM models, tap to switch instantly |
 | `/organize preview` | Show which sparse category folders would be merged |
@@ -101,6 +102,16 @@ Send with a caption or `/command`:
 | "Could not extract book metadata" | The PDF may be encrypted or image-only. Try a text-based PDF or send as a regular document (without `/book`). |
 | Handwriting transcription inaccurate | Use `/learn` first: send a photo of your handwriting with caption `/learn`, then type the correct text in the next message. This trains the few-shot model. |
 | LLM quota exhausted | Run `/models` to see available models. The bot auto-switches to a working free model on quota errors. |
+
+### 🏥 Vault health monitoring
+
+| Tool | Where | What it does |
+|---|---|---|
+| `/vault` | Telegram | Check vault access, write test, disk space, recent notes |
+| `vault-health.sh` | Host (VPS) | Full diagnostic with `--fix` to auto-restart container |
+| `diagnose_rclone.sh` | Host (VPS) | 14 detailed checks including PATH MISMATCH detection |
+
+Run `/vault` in Telegram anytime to verify notes are being saved. If you see "Vault NOT accessible", run `bash vault-health.sh --fix` on the host.
 
 ### 🗂️ Automatic organization
 

@@ -95,6 +95,7 @@ and `BOOK_FULLTEXT` in `.env`.
 | `/voice` · `/audio` | **One function, two names** — transcribe every queued audio into **one** note; as a **caption** on a voice message or audio file it transcribes immediately (identical for both) |
 | `/queue` | See what's waiting (items expire after `PENDING_QUEUE_TTL_HOURS`, default 24h) |
 | `/disk` | Check vault disk usage & warnings if space < 20% |
+| `/vault` | Verify vault sync health — mount status, write test, disk space, recent notes |
 | `/research <topic>` | Deep web research with cited sources |
 | `/models` | List working LLM models, tap to switch instantly |
 | `/organize preview` | Show which sparse category folders would be merged (keyword rules + manual taxonomy; sub-folders preserved) |
@@ -132,6 +133,36 @@ and `BOOK_FULLTEXT` in `.env`.
 | "Could not extract book metadata" | PDF may be encrypted or image-only. Try a text-based PDF or send without `/book`. |
 | Handwriting inaccurate | Use `/learn` first: photo with caption `/learn`, then type correct text in next message. |
 | LLM quota exhausted | Run `/models`. The bot auto-switches to a working free model on quota errors. |
+
+---
+
+## Vault sync scripts
+
+### `/vault` command (in-bot)
+
+Run `/vault` in Telegram to check:
+- Vault accessible (items count)
+- Write test (can the container write?)
+- Disk space (free/total/used %)
+- Notes created in last 24h
+
+### `vault-health.sh` (host)
+
+Run on the VPS host for full diagnostic with auto-fix:
+
+```bash
+# Check only
+bash vault-health.sh
+
+# Check + auto-restart container if bind mount is stale
+bash vault-health.sh --fix
+```
+
+Checks: rclone mount process, mount point, container status, vault access, write test, Google Drive connection.
+
+### `diagnose_rclone.sh` (host)
+
+Full diagnostic with 14 detailed checks including PATH MISMATCH detection between Docker mount and rclone mount.
 
 ---
 
