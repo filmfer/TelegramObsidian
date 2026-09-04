@@ -13,6 +13,46 @@ logger = logging.getLogger(__name__)
 _SAFE_CHARS = re.compile(r"[^A-Za-z0-9 _\-.]+")
 _TRAVERSAL = re.compile(r"(\.\.|[/\\])")
 
+# Single source of truth for the vault location.
+# In the container this MUST match the docker-compose bind mount
+# (`${OBSIDIAN_VAULT_HOST_PATH}:<VAULT_ROOT>`). Never fall back to a relative
+# path: that would silently write notes into the container's ephemeral layer —
+# the bot reports success while nothing reaches the host / Google Drive.
+DEFAULT_VAULT_ROOT = "/data/vault"
+
+
+def get_vault_root() -> str:
+    """Resolve the vault root: OBSIDIAN_VAULT_PATH env var or the container default."""
+    return os.getenv("OBSIDIAN_VAULT_PATH", DEFAULT_VAULT_ROOT)
+
+
+def warn_if_not_mountpoint(vault_root: str) -> None:
+    """Log CRITICAL if the default vault root is not a bind mount (silent-loss guard).
+
+    Only applies to DEFAULT_VAULT_ROOT: a custom path is a deliberate local-dev
+    choice, and /proc/mounts only exists on Linux (i.e. inside the container).
+    """
+    if vault_root != DEFAULT_VAULT_ROOT:
+        return
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) > 1 and parts[1] == vault_root:
+                    return  # bind mount present — all good
+        logger.critical(
+            "VAULT MISCONFIGURED: %s is NOT a mountpoint — notes will be written "
+            "to the container's ephemeral layer and lost on rebuild. Set "
+            "OBSIDIAN_VAULT_PATH=%s in .env and verify the docker-compose bind "
+            "mount (${OBSIDIAN_VAULT_HOST_PATH}:/data/vault).",
+            vault_root,
+            vault_root,
+        )
+    except FileNotFoundError:
+        return  # not Linux / not containerized (local dev) — skip check
+    except OSError as e:
+        logger.warning("Could not verify vault mountpoint: %s", e)
+
 # Single source of truth: maps an AI category keyword to a vault folder.
 CATEGORY_MAP = {
     "travel": "Travel",
@@ -94,7 +134,7 @@ def _normalize_categories(note: Dict[str, Any]) -> List[str]:
 
 def write_note_to_vault(note: Dict[str, Any]) -> Optional[str]:
     """Write a Markdown note into the Obsidian vault under its primary category folder."""
-    vault_root = os.getenv("OBSIDIAN_VAULT_PATH", "ObsidianVault")
+    vault_root = get_vault_root()
     mapped = _normalize_categories(note)
     folder_name = mapped[0]
     folder_path = Path(vault_root) / folder_name

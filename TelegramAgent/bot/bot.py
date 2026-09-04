@@ -74,7 +74,12 @@ from llm.provider import (
     set_current_model,
     validate_and_autoswitch,
 )
-from storage.vault_writer import derive_detail_level, write_note_to_vault
+from storage.vault_writer import (
+    derive_detail_level,
+    get_vault_root,
+    warn_if_not_mountpoint,
+    write_note_to_vault,
+)
 from storage.vault_organizer import apply_merge, build_merge_plan, make_keyword_suggester
 from storage.dashboard import write_dashboard
 from storage.dedup_store import (
@@ -118,12 +123,19 @@ for _noisy in ("httpx", "httpcore", "urllib3", "asyncio"):
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-VAULT_PATH = os.getenv("OBSIDIAN_VAULT_PATH", "ObsidianVault")
+# Vault root — single source of truth in storage.vault_writer. Falls back to
+# /data/vault (the docker-compose bind mount contract), never a relative path.
+VAULT_PATH = get_vault_root()
 # Chat used for proactive alerts (weekly model checks). Optional.
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Set TELEGRAM_BOT_TOKEN in .env")
+
+# Fail LOUD before any write: if /data/vault isn't the bind mount, notes would
+# silently vanish into the container's ephemeral layer (bot still reports OK).
+warn_if_not_mountpoint(VAULT_PATH)
+logger.info("Vault root resolved to: %s", VAULT_PATH)
 
 Path(VAULT_PATH).mkdir(parents=True, exist_ok=True)
 ATTACHMENTS_DIR = Path(VAULT_PATH, "90_Attachments")

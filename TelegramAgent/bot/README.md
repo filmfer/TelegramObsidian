@@ -263,8 +263,8 @@ cd TelegramAgent/bot && docker compose up -d --build
 | `LLM_MODEL` | `gemini/gemini-flash-latest` | preferred model (litellm format) |
 | `LLM_FALLBACKS` | see example | comma-separated fallback chain |
 | `TELEGRAM_CHAT_ID` | — | chat for proactive alerts (disk space) |
-| `OBSIDIAN_VAULT_PATH` | `/data/vault` | vault path **inside** the container |
-| `OBSIDIAN_VAULT_HOST_PATH` | `/srv/obsidian-vault` | host path bind-mounted into the container |
+| `OBSIDIAN_VAULT_PATH` | `/data/vault` | vault path **inside** the container — **must** be set; without it notes are lost on rebuild |
+| `OBSIDIAN_VAULT_HOST_PATH` | `/srv/obsidian-vault` | host path bind-mounted into the container (where rclone mounts Google Drive) |
 | `DEDUP_DB_PATH` | `data/agent.db` | SQLite dedup + queue store |
 | `PENDING_QUEUE_TTL_HOURS` | `24` | expiry for `/text`/`/voice` queue items |
 | `TASK_TIMEOUT_SECONDS` | `600` | hard cap per task |
