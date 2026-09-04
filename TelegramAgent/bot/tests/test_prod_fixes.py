@@ -154,6 +154,14 @@ def main():
     # Clean up test data
     ds.pending_clear(999, "text")
 
+    # ---- Fix 7: /research CommandHandler registration ----
+    # Verify the /research command handler is registered (was missing, causing
+    # /research <topic> to be silently swallowed by handle_unsupported).
+    bot_src = Path(bot.__file__).read_text()
+    check("/research handler registered in main()", 'CommandHandler("research"' in bot_src)
+    check("research_command function exists", hasattr(bot, "research_command"))
+    check("research_command is callable", callable(bot.research_command))
+
 
     print(f"\n{sum(1 for _, ok in results if ok)}/{len(results)} checks passed")
     return 0 if all(ok for _, ok in results) else 1

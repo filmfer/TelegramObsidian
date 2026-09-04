@@ -1731,6 +1731,7 @@ def main():
     for cmd in ("summarize", "detailed", "precise", "raw", "book", "handwritten"):
         app.add_handler(CommandHandler(cmd, set_detail_command))
     app.add_handler(CommandHandler("learn", learn_command))
+    app.add_handler(CommandHandler("research", research_command))
     app.add_handler(CallbackQueryHandler(model_choice_callback, pattern=r"^swm:\d+$"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
