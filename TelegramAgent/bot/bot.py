@@ -274,7 +274,7 @@ async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2. Check write access
     try:
-        test_file = VAULT_PATH / f".vault_check_{int(time.time())}.txt"
+        test_file = Path(VAULT_PATH) / f".vault_check_{int(time.time())}.txt"
         test_file.write_text("ok")
         test_file.unlink()
         checks.append("✅ Write test passed")
@@ -299,12 +299,12 @@ async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         recent = 0
         cutoff = time.time() - 86400  # 24h
-        for f in VAULT_PATH.rglob("*.md"):
+        for f in Path(VAULT_PATH).rglob("*.md"):
             if f.stat().st_mtime > cutoff:
                 recent += 1
         checks.append(f"📝 Notes created (24h): {recent}")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Vault note-count check failed: {e}")
 
     # Build response
     status = "✅ HEALTHY" if healthy else "❌ ISSUES FOUND"
