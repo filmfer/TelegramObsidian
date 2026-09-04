@@ -367,14 +367,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    file_obj = await update.message.document.get_file()
-    if not file_obj:
-        await update.message.reply_text("❌ No valid document received.")
-        return
-
     status = StatusMessage(await update.message.reply_text("🔄 Processing document…"))
     await run_with_deadline(
-        status, _document_job(update, file_obj, caption, detail_level, status)
+        status, _document_job(update, document, caption, detail_level, status)
     )
 
 
@@ -476,18 +471,15 @@ async def _document_image_job(update, context, document, status):
             logger.info("Restored previous text model after image note: %s", prev_model)
 
 
-async def _document_job(update, file_obj, caption, detail_level, status):
+async def _document_job(update, document, caption, detail_level, status):
     """Download → dedup-check → parse/book-route → analyze (under deadline)."""
     try:
         with tempfile.TemporaryDirectory() as tmp:
             try:
-                local_path = await file_obj.download_to_drive(tmp)
+                local_path = await _download_telegram_file(document, tmp, what="document")
             except Exception as e:
                 logger.error("Document download failed: %s", e, exc_info=True)
-                await status.fail(
-                    "Could not download the file from Telegram. "
-                    "The file may be too large or the connection failed."
-                )
+                await status.fail(_download_error_text("document", e))
                 return
             fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
             force = _wants_force(caption)
