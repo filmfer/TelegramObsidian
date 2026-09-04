@@ -126,8 +126,16 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 # Vault root — single source of truth in storage.vault_writer. Falls back to
 # /data/vault (the docker-compose bind mount contract), never a relative path.
 VAULT_PATH = get_vault_root()
-# Chat used for proactive alerts (weekly model checks). Optional.
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Owner chat for proactive alerts + /vault guard. Normalized to int: Telegram
+# chat ids are ints, and `int != str` would silently block the /vault command
+# even when TELEGRAM_CHAT_ID is correctly configured in .env.
+_chat_id_raw = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+TELEGRAM_CHAT_ID = int(_chat_id_raw) if _chat_id_raw.isdigit() else None
+if TELEGRAM_CHAT_ID is None:
+    logger.warning(
+        "TELEGRAM_CHAT_ID not set — /vault is unlocked for any sender and "
+        "proactive disk alerts are disabled. Set it in .env to restrict access."
+    )
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Set TELEGRAM_BOT_TOKEN in .env")
@@ -240,8 +248,8 @@ async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import subprocess
 
     chat_id = update.effective_chat.id
-    if chat_id != TELEGRAM_CHAT_ID:
-        return
+    if TELEGRAM_CHAT_ID is not None and chat_id != TELEGRAM_CHAT_ID:
+        return  # not the owner chat — ignore silently
 
     await update.message.reply_text("🔍 Checking vault health…")
 
