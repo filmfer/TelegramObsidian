@@ -212,8 +212,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/queue — see what's waiting\n"
         "/research <topic> — deep web research, cited sources\n"
         "Detail levels: /summarize /detailed /precise /raw /book /handwritten\n"
-        "(handwritten = transcribe handwritten notes, pt-PT; /learn first to train)
-"
+        "(handwritten = transcribe handwritten notes, pt-PT; /learn first to train)\n"
                 "LLM models: /models\n"
         "/disk — check vault disk space\n"
         "/organize preview — tidy sparse categories into broad ones (plan only)\n"
@@ -479,54 +478,78 @@ async def _document_image_job(update, context, document, status):
 
 async def _document_job(update, file_obj, caption, detail_level, status):
     """Download → dedup-check → parse/book-route → analyze (under deadline)."""
-    with tempfile.TemporaryDirectory() as tmp:
-        local_path = await file_obj.download_to_drive(tmp)
-        fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
-        force = _wants_force(caption)
-        if await _reject_duplicate(update, fingerprint, force):
-            return
-        attachment_rel = _save_attachment(local_path)
-
-        # --- E-BOOK ROUTE ---
-        if detail_level == "book" or is_book_file(local_path):
-            book_meta = extract_book_metadata(local_path)
-            if not book_meta:
-                await update.message.reply_text(
-                    "❌ Could not extract book metadata. The file is still saved as an attachment."
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                local_path = await file_obj.download_to_drive(tmp)
+            except Exception as e:
+                logger.error("Document download failed: %s", e, exc_info=True)
+                await status.fail(
+                    "Could not download the file from Telegram. "
+                    "The file may be too large or the connection failed."
                 )
                 return
-            book_meta["path"] = local_path  # needed for chapter extraction
-            await _save_book_note(
-                update,
-                context,
-                book_meta,
-                detail_level=detail_level,
-                source=f"telegram-book::{Path(local_path).name}",
-                attachment=attachment_rel,
-                fingerprint=fingerprint,
-                force=force,
-            )
+            fingerprint = await asyncio.to_thread(compute_file_fingerprint, local_path)
+            force = _wants_force(caption)
+            if await _reject_duplicate(update, fingerprint, force):
+                return
+            attachment_rel = _save_attachment(local_path)
+
+            # --- E-BOOK ROUTE ---
+            if detail_level == "book" or is_book_file(local_path):
+                book_meta = extract_book_metadata(local_path)
+                if not book_meta:
+                    await update.message.reply_text(
+                        "❌ Could not extract book metadata. The file is still saved as an attachment."
+                    )
+                    return
+                # Copy to a persistent location for the background task
+                # (temp dir will be deleted when this function returns)
+                persistent_path = ATTACHMENTS_DIR / Path(local_path).name
+                try:
+                    shutil.copy2(local_path, persistent_path)
+                except Exception as e:
+                    logger.warning("Could not copy book to persistent storage: %s", e)
+                    persistent_path = Path(local_path)  # fallback to temp path
+                book_meta["path"] = str(persistent_path)
+                await _save_book_note(
+                    update,
+                    context,
+                    book_meta,
+                    detail_level=detail_level,
+                    source=f"telegram-book::{Path(local_path).name}",
+                    attachment=attachment_rel,
+                    fingerprint=fingerprint,
+                    force=force,
+                )
+                return
+
+            # --- STANDARD DOCUMENT ROUTE ---
+            content_text = parse_document(local_path)
+
+        if not content_text:
+            await update.message.reply_text("❌ Could not parse document content.")
             return
 
-        # --- STANDARD DOCUMENT ROUTE ---
-        content_text = parse_document(local_path)
-
-    if not content_text:
-        await update.message.reply_text("❌ Could not parse document content.")
-        return
-
-    await analyze_and_save(
-        update,
-        context,
-        content_text,
-        detail_level,
-        source=f"telegram-doc::{Path(local_path).name}",
-        source_type="document",
-        source_kind="document",
-        attachment=attachment_rel,
-        fingerprint=fingerprint,
-        force=force,
-    )
+        await analyze_and_save(
+            update,
+            context,
+            content_text,
+            detail_level,
+            source=f"telegram-doc::{Path(local_path).name}",
+            source_type="document",
+            source_kind="document",
+            attachment=attachment_rel,
+            fingerprint=fingerprint,
+            force=force,
+        )
+    except Exception as e:
+        logger.error("_document_job failed: %s", e, exc_info=True)
+        await status.fail(
+            "Something went wrong while processing this document. "
+            "The error was logged. Try sending it again — if it keeps failing, "
+            "run /models to check AI providers."
+        )
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
