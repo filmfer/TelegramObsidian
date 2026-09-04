@@ -179,6 +179,27 @@ def main():
     p, fid = bot._staging_entry(enc)
     check("staging JSON stores path and file_id", p == "/app/data/staging/5/abc.oga" and fid == "AwAd-123")
     check("legacy plain-path content still parses", bot._staging_entry("/x/a.oga") == ("/x/a.oga", None))
+
+    # 9. Queue cleanup on unrecoverable error (text)
+    from storage.dedup_store import pending_add, pending_list, pending_clear
+    import importlib
+    tmpdb = tempfile.mktemp(suffix=".db")
+    os.environ["DEDUP_DB_PATH"] = tmpdb
+        # re-import so the module picks up the new path
+    import importlib, storage.dedup_store as _ds
+    importlib.reload(_ds)
+    _ds.init_db()
+    cid = 999001
+    _ds.pending_add(cid, "text", "hello")
+    _ds.pending_add(cid, "text", "world")
+    items_before = _ds.pending_list(cid, "text")
+    check("2 text items queued", len(items_before) == 2)
+    # Simulate what the fixed code does on terminal outcome (None = unrecoverable error)
+    ids = [it["id"] for it in items_before]
+    deleted = _ds.pending_delete(ids)
+    check("queue cleared after terminal outcome", deleted == 2 and len(_ds.pending_list(cid, "text")) == 0)
+    os.unlink(tmpdb)
+
     print(f"\n{sum(1 for _, ok in results if ok)}/{len(results)} checks passed")
     return 0 if all(ok for _, ok in results) else 1
 

@@ -529,6 +529,23 @@ async def _document_job(update, file_obj, caption, detail_level, status):
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """URLs are scraped+summarized; plain text becomes a personal knowledge note."""
+    # --- Command guard: catch /text, /voice, /audio etc. that slipped through
+    # the CommandHandler layer (group chats, @mention syntax /text@Bot, etc.).
+    # Prevents commands from being queued as plain text.
+    if (
+        update.message
+        and update.message.text
+        and update.message.text.startswith("/")
+        and " " not in update.message.text.strip()
+        and chr(10) not in update.message.text
+    ):
+        await update.message.reply_text(
+            'ℹ️ That is a command — it has no text argument.\n'
+            "Use /text, /voice or /audio alone to process queued items."
+        )
+        return
+
+
     text = (update.message.text or "").strip()
     user_id = update.effective_user.id if update.effective_user else 0
     # Only URL processing is rate-limited; plain text queueing is cheap and must
@@ -638,6 +655,7 @@ async def text_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id, len(items), [it["id"] for it in items],
     )
     ids = [it["id"] for it in items]
+    result = None
     try:
         result = await run_with_deadline(
             status, _text_note_job(update, context, combined[:12000], detail, status)
@@ -645,24 +663,28 @@ async def text_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result is TIMEOUT:
             logger.warning("Queue[text] chat=%s: timed out — items kept for retry", chat_id)
             return
-        if not result:
-            logger.warning("Queue[text] chat=%s: no note produced — items kept", chat_id)
-            return
-        # Success (True) or duplicate ("duplicate") → items are fully handled.
+    except Exception as e:
+        logger.error(
+            "Queue[text] chat=%s: unrecoverable error — items will be cleared",
+            chat_id, exc_info=True,
+        )
+        if not getattr(e, "handled", False):
+            await status.fail(f"❌ Could not create the note: {e}")
+        # Fall through to cleanup below (terminal failure — keep queue cleared).
+    # Terminal outcome (True, "duplicate", or unrecoverable error) → clear the queue.
+    # Items are kept ONLY on timeout (handled in the branch above).
+    if result is True or result == "duplicate" or result is None:
         deleted = await asyncio.to_thread(pending_delete, ids)
+        if deleted == 0 and ids:
+            logger.warning(
+                "Queue[text] chat=%s: pending_delete cleared 0 — fallback pending_clear",
+                chat_id,
+            )
+            deleted = await asyncio.to_thread(pending_clear, chat_id, "text")
         logger.info(
             "Queue[text] chat=%s: cleared %d item(s) after outcome=%r",
             chat_id, deleted, result,
         )
-    except Exception as e:
-        logger.error(
-            "Queue[text] chat=%s: processing failed — items kept for retry",
-            chat_id, exc_info=True,
-        )
-        # analyze_and_save already reported handled provider errors to the user;
-        # anything else gets a generic failure note here (never silent).
-        if not getattr(e, "handled", False):
-            await status.fail(f"Could not create the note: {e}")
 
 
 async def voice_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -684,28 +706,34 @@ async def voice_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         chat_id, len(items), [it["id"] for it in items],
     )
     ids = [it["id"] for it in items]
+    result = None
     try:
         result = await run_with_deadline(status, _voice_queue_job(update, context, items, status))
         if result is TIMEOUT:
             logger.warning("Queue[voice] chat=%s: timed out — items kept for retry", chat_id)
             return
-        if not result:
-            # Nothing was transcribed (or write failed) — keep items for retry.
-            logger.warning("Queue[voice] chat=%s: no transcription produced — items kept", chat_id)
-            return
-        # Success (True) or duplicate ("duplicate") → items are fully handled.
+    except Exception as e:
+        logger.error(
+            "Queue[voice] chat=%s: unrecoverable error — items will be cleared",
+            chat_id, exc_info=True,
+        )
+        if not getattr(e, "handled", False):
+            await status.fail(f"❌ Could not create the note: {e}")
+        # Fall through to cleanup below (terminal failure — keep queue cleared).
+    # Terminal outcome (True, "duplicate", or unrecoverable error) → clear the queue.
+    # Items are kept ONLY on timeout (handled in the branch above).
+    if result is True or result == "duplicate" or result is None:
         deleted = await asyncio.to_thread(pending_delete, ids)
+        if deleted == 0 and ids:
+            logger.warning(
+                "Queue[voice] chat=%s: pending_delete cleared 0 — fallback pending_clear",
+                chat_id,
+            )
+            deleted = await asyncio.to_thread(pending_clear, chat_id, "voice")
         logger.info(
             "Queue[voice] chat=%s: cleared %d item(s) after outcome=%r",
             chat_id, deleted, result,
         )
-    except Exception as e:
-        logger.error(
-            "Queue[voice] chat=%s: processing failed — items kept for retry",
-            chat_id, exc_info=True,
-        )
-        if not getattr(e, "handled", False):
-            await status.fail(f"Could not create the note: {e}")
 
 async def _voice_queue_job(update, context, items, status):
     """Transcribe queued audio files sequentially, then build a merged note.
@@ -1693,6 +1721,7 @@ def main():
     app.add_handler(CommandHandler("help", start_command))
     app.add_handler(CommandHandler("models", models_command))
     app.add_handler(CommandHandler("disk", disk_command))
+    app.add_handler(CommandHandler("text", text_note_command))
     app.add_handler(CommandHandler("voice", voice_note_command))
     app.add_handler(CommandHandler("audio", voice_note_command))
     app.add_handler(CommandHandler("queue", queue_command))

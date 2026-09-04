@@ -105,6 +105,56 @@ def main():
     check("still blocked", b3 is True)
     check("exactly ONE warning for the burst", n_warn == 1)
 
+    # ---- Fix 6: command guard in handle_text ----
+    # Bare commands must NOT be queued as text.
+    sent_cmd = []
+
+    class FakeMsg2:
+        def __init__(self, text):
+            self.text = text
+
+        async def reply_text(self, t, **kw):
+            sent_cmd.append(t)
+
+    class FakeEffectiveUser:
+        id = 42
+
+    class FakeUpdate2:
+        effective_user = FakeEffectiveUser()
+        def __init__(self, text):
+            self.message = FakeMsg2(text)
+            self.effective_chat = SimpleNamespace(id=999)
+
+    async def cmd_guard_tests():
+        # Test 1: bare commands -> guard catches, replies, returns (no queueing)
+        for cmd in ["/text", "/voice", "/audio"]:
+            sent_cmd.clear()
+            await bot.handle_text(FakeUpdate2(cmd), SimpleNamespace(user_data={}))
+            check(f"guard caught bare {cmd}", len(sent_cmd) == 1)
+            check(f"bare {cmd} not queued", len(ds.pending_list(999, "text")) == 0)
+        # Test 2: command with arg -> guard does NOT catch (has a space) -> queued
+        sent_cmd.clear()
+        await bot.handle_text(FakeUpdate2("/text some arg"), SimpleNamespace(user_data={}))
+        check("guard skipped /text with argument", len(sent_cmd) == 1)
+        check("/text with arg queued", len(ds.pending_list(999, "text")) == 1)
+        # Test 3: plain text -> NOT caught -> queued
+        sent_cmd.clear()
+        await bot.handle_text(FakeUpdate2("hello world"), SimpleNamespace(user_data={}))
+        check("guard skipped plain text", len(sent_cmd) == 1)
+        check("plain text queued", len(ds.pending_list(999, "text")) == 2)
+    guard_sent = asyncio.get_event_loop().run_until_complete(cmd_guard_tests())
+    # Verify queue was NOT polluted with the bare commands
+    check("queue has exactly 2 items (no bare commands)", len(ds.pending_list(999, "text")) == 2)
+    check("bare /text not in queue", "/text" not in [
+        it["content"] for it in ds.pending_list(999, "text")])
+    check("bare /voice not in queue", "/voice" not in [
+        it["content"] for it in ds.pending_list(999, "text")])
+    check("bare /audio not in queue", "/audio" not in [
+        it["content"] for it in ds.pending_list(999, "text")])
+    # Clean up test data
+    ds.pending_clear(999, "text")
+
+
     print(f"\n{sum(1 for _, ok in results if ok)}/{len(results)} checks passed")
     return 0 if all(ok for _, ok in results) else 1
 
