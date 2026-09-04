@@ -64,6 +64,8 @@ data/agent.db              SQLite state (dedup + queues) — outside the vault o
 | `/precise` | Exact data extraction — every number preserved |
 | `/raw` | Verbatim text, metadata only |
 | `/book` | Deep book mode: chapter-by-chapter summaries + full-text Markdown (background) |
+| `/handwritten` ⚠️ | Handwritten photo → **verbatim** transcription (pt-PT), title + categories only — content untouched *(under development)* |
+| `/learn` ⚠️ | Teach the bot your handwriting: photo + correct text → used as few-shot reference *(under development)* |
 
 ### Book notes (v1.5)
 
@@ -97,6 +99,9 @@ and `BOOK_FULLTEXT` in `.env`.
 | `/models` | List working LLM models, tap to switch instantly |
 | `/organize preview` | Show which sparse category folders would be merged (keyword rules + manual taxonomy; sub-folders preserved) |
 | `/organize` | Propose merges → confirm via inline keyboard → applies with a git commit; sub-category folders move intact under the target |
+| `/image` *(caption on a photo or album)* | **Detailed image analysis** like the link flow — every original image embedded as a gallery in the note; free vision models first, paid Gemini as automatic fallback; your active text model is restored afterwards |
+| `/handwritten` ⚠️ | Handwritten photo → verbatim transcription (pt-PT) *(under development)* |
+| `/learn` ⚠️ | Teach the bot your handwriting: photo + correct text → few-shot reference *(under development)* |
 | `/dashboard` | Rebuild `Recent Notes.md` at the vault root — newest notes per category (auto-refreshed weekly, silently) |
 | `/start` · `/help` | Full usage guide |
 

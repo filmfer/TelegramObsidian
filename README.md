@@ -76,6 +76,8 @@ Send with a caption or `/command`:
 | `/models` | List working LLM models, tap to switch instantly |
 | `/organize preview` | Show which sparse category folders would be merged |
 | `/organize` | Propose merges and ask for confirmation before moving anything |
+| `/handwritten` ⚠️ | Handwritten photo → verbatim transcription (pt-PT) *(under development)* |
+| `/learn` ⚠️ | Teach the bot your handwriting: photo + correct text → few-shot reference *(under development)* |
 | `/start` · `/help` | Full usage guide |
 
 ### 🛡️ Never lose work

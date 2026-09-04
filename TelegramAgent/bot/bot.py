@@ -211,7 +211,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "        immediately (same behaviour for both)\n"
         "/queue — see what's waiting\n"
         "/research <topic> — deep web research, cited sources\n"
-        "Detail levels: /summarize /detailed /precise /raw /book\n"
+        "Detail levels: /summarize /detailed /precise /raw /book /handwritten\n"
+        "(handwritten = transcribe handwritten notes, pt-PT; /learn first to train)
+"
                 "LLM models: /models\n"
         "/disk — check vault disk space\n"
         "/organize preview — tidy sparse categories into broad ones (plan only)\n"
