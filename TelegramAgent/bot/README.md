@@ -110,11 +110,28 @@ and `BOOK_FULLTEXT` in `.env`.
 - **Dedup** — same link/file/text twice is caught by SQLite fingerprints
   (URLs normalized, tracking params stripped, YouTube collapses to video id).
   Override per-send with `--force` in the caption/message.
-- **Queues survive restarts** — `/text` and `/voice` items live in SQLite.
+- **Queues survive restarts** — `/text` and `/voice` items live in SQLite
+  and expire after `PENDING_QUEUE_TTL_HOURS` (default 24h).
+  Queue auto-clears after success or failure — no stuck items.
 - **10-minute hard cap** — every heavy task has a deadline with a
   "still working" checkpoint; runaway jobs are cancelled cleanly.
+- **Download resilience** — file downloads retry on transient network errors
+  and fall back to in-memory download if disk write fails.
 - **Global error handler** — any unhandled exception is logged (rotating
   `logs/bot.log`) and you get a friendly message, never silence.
+
+---
+
+## Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| "Something went wrong" on upload | Check `logs/bot.log` for the actual error. Run `/models` to verify AI providers. |
+| "Could not download the file" | Transient network error — the bot auto-retries. Check server outbound connectivity. |
+| Queue stuck at N items | Queues auto-clean after processing. Send the command again to force processing. |
+| "Could not extract book metadata" | PDF may be encrypted or image-only. Try a text-based PDF or send without `/book`. |
+| Handwriting inaccurate | Use `/learn` first: photo with caption `/learn`, then type correct text in next message. |
+| LLM quota exhausted | Run `/models`. The bot auto-switches to a working free model on quota errors. |
 
 ---
 

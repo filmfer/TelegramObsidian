@@ -5,7 +5,7 @@
 > **Turn Telegram into your personal knowledge capture pipeline.** Send documents, links, and e-books to a bot — get clean, AI-categorized Markdown notes in your Obsidian vault, synced across all your devices.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v1.9.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
+[![Release](https://img.shields.io/badge/release-v1.12.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-ready-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4.svg?logo=telegram&logoColor=white)](https://telegram.org/)
@@ -83,11 +83,24 @@ Send with a caption or `/command`:
 ### 🛡️ Never lose work
 
 - **Duplicate detection** — the same link, file or text sent twice is caught by a local SQLite fingerprint store (URLs are normalized; tracking params stripped; YouTube links collapse to the video id). Add `--force` to any caption/message to override.
-- **Queues survive restarts** — `/text` and `/voice` items are persisted in SQLite and expire after `PENDING_QUEUE_TTL_HOURS` (default 24h).
+- **Queues survive restarts** — `/text` and `/voice` items are persisted in SQLite and expire after `PENDING_QUEUE_TTL_HOURS` (default 24h). Queue auto-clears after success or failure — no stuck items.
 - **Disk-space health alerts** — proactive warning every 6h + inline alerts on notes when free disk space falls below 20% (`DISK_WARN_THRESHOLD_PCT`).
 - **10-minute hard cap** — every heavy task is wrapped in a deadline with a "still working" checkpoint; runaway jobs are cancelled and you're told why.
+- **Download resilience** — file downloads retry on transient network errors and fall back to in-memory download if disk write fails. No false "file too large" blame for network issues.
 - **Scraper & YouTube resilience** — multi-tier scraper fallback (headers → cloudscraper → jina.ai) and YouTube fallback chain (API → yt-dlp subtitles → local Whisper) handles videos up to 1h30+ for free.
 - **Thumbnails** — link & video notes embed the page's `og:image` (or the YouTube thumbnail) at the top, stored in `90_Attachments/thumbnails/`.
+- **Global error handler** — any unhandled exception is logged (rotating `logs/bot.log`) and you get a friendly message, never silence.
+
+### 🔧 Troubleshooting
+
+| Problem | Solution |
+|---|---|
+| "Something went wrong" on upload | Check `logs/bot.log` for the actual error. Run `/models` to verify AI providers are reachable. |
+| "Could not download the file" | Transient network error — the bot auto-retries. If it persists, check your server's outbound connectivity. |
+| Queue stuck at N items | Queues auto-clean after processing. If stuck, send the command again (`/text`, `/voice`) to force processing. |
+| "Could not extract book metadata" | The PDF may be encrypted or image-only. Try a text-based PDF or send as a regular document (without `/book`). |
+| Handwriting transcription inaccurate | Use `/learn` first: send a photo of your handwriting with caption `/learn`, then type the correct text in the next message. This trains the few-shot model. |
+| LLM quota exhausted | Run `/models` to see available models. The bot auto-switches to a working free model on quota errors. |
 
 ### 🗂️ Automatic organization
 
