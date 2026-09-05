@@ -113,6 +113,14 @@ Send with a caption or `/command`:
 
 Run `/vault` in Telegram anytime to verify notes are being saved. If you see "Vault NOT accessible", run `bash vault-health.sh --fix` on the host.
 
+> **Architecture:** `Google Drive ↔ rclone mount (OBSIDIAN_VAULT_HOST_PATH, e.g. /mnt/obsidian-vault) ↔ Docker bind mount ↔ /data/vault (container) ↔ OBSIDIAN_VAULT_PATH`.
+> All three paths must resolve to the same location. **Golden rule:** after a reboot
+> or rclone restart, bring the **rclone mount up first**, then recreate the
+> container (`docker compose up -d --force-recreate`) — a container started
+> before the mount gets a stale FUSE handle (`Transport endpoint is not connected`).
+> Note: `docker compose restart` does **not** re-read `.env`; use `--force-recreate`
+> after any env change. See `TelegramAgent/bot/README.md → "Ops lessons learned"`.
+
 ### 🗂️ Automatic organization
 
 AI classifies every note into your vault folders:

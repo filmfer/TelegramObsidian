@@ -164,6 +164,20 @@ Checks: rclone mount process, mount point, container status, vault access, write
 
 Full diagnostic with 14 detailed checks including PATH MISMATCH detection between Docker mount and rclone mount.
 
+### Ops lessons learned (⚠️ read before debugging sync issues)
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| Notes "saved" but never reach Google Drive | `OBSIDIAN_VAULT_PATH` unset → fallback resolved to a **relative** path inside the container layer (ephemeral, lost on rebuild) | Set `OBSIDIAN_VAULT_PATH=/data/vault`. Startup now logs `CRITICAL — VAULT MISCONFIGURED` if `/data/vault` is not a mountpoint |
+| Commands respond, notes don't (or vice-versa) | rclone mount and Docker bind mount point to **different host paths** (e.g. rclone → `/mnt/obsidian-vault`, bind → `/srv/obsidian-vault`) | Both must be the **same path**. `diagnose_rclone.sh` check 7 detects this |
+| `Transport endpoint is not connected` | Bind mount went stale: the rclone mount underneath was restarted while the container kept the old FUSE handle | `docker compose up -d --force-recreate` (or `bash vault-health.sh --fix`) **after** the rclone mount is up |
+| `.env` change has no effect after `docker compose restart` | `restart` does **not** re-read `env_file` — the container keeps its old environment | Use `docker compose up -d --force-recreate` whenever `.env` changes |
+| Variable set but bot behaves as if unset | Duplicate keys in `.env` — **the last occurrence wins** (and a leftover placeholder like `TELEGRAM_CHAT_ID=<TEU_ID_AQUI>` silently breaks the guard) | `grep -n VAR .env` → keep exactly one line; `sed -i '/^VAR=/d' .env && echo "VAR=value" >> .env` |
+| `/vault` or other commands silently dead | Container was mid-rebuild (polling offline), or a **second bot instance** elsewhere is consuming the same token's updates | Check `docker ps -a` for duplicates; `curl api.telegram.org/bot$TOKEN/getWebhookInfo` and confirm no other host polls the token |
+
+**Golden rule:** order of operations after a reboot or rclone restart is
+**rclone mount up → then recreate the container** — never the reverse.
+
 ---
 
 ## Multi-provider LLM
@@ -262,7 +276,7 @@ cd TelegramAgent/bot && docker compose up -d --build
 | `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` / `OLLAMA_HOST` | — | LLM providers (at least one) |
 | `LLM_MODEL` | `gemini/gemini-flash-latest` | preferred model (litellm format) |
 | `LLM_FALLBACKS` | see example | comma-separated fallback chain |
-| `TELEGRAM_CHAT_ID` | — | chat for proactive alerts (disk space) |
+| `TELEGRAM_CHAT_ID` | — | **your** chat id — restricts `/vault` to you and enables proactive disk alerts; **unset = `/vault` open to anyone and alerts off** |
 | `OBSIDIAN_VAULT_PATH` | `/data/vault` | vault path **inside** the container — **must** be set; without it notes are lost on rebuild |
 | `OBSIDIAN_VAULT_HOST_PATH` | `/srv/obsidian-vault` | host path bind-mounted into the container (where rclone mounts Google Drive) |
 | `DEDUP_DB_PATH` | `data/agent.db` | SQLite dedup + queue store |
