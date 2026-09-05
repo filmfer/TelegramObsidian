@@ -15,7 +15,7 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from telegram import Message, Update
 
@@ -24,7 +24,15 @@ logger = logging.getLogger(__name__)
 TASK_TIMEOUT_SECONDS = int(os.getenv("TASK_TIMEOUT_SECONDS", "600"))
 TASK_WARN_SECONDS = int(os.getenv("TASK_WARN_SECONDS", "100"))
 
-# Returned by run_with_deadline when the hard timeout hit.
+# Sentinel returned by run_with_deadline when the hard timeout was hit.
+#
+# Educational note — why a private object() instead of None or a string:
+# the wrapped coroutine may legitimately return None (or any value), so
+# callers MUST be able to distinguish "job returned nothing" from "job was
+# cancelled". object() creates a unique identity that no other value can
+# ever equal, and callers compare with `result is TIMEOUT` — the `is`
+# operator checks identity (same object in memory), which is the correct
+# and fast way to test for a sentinel (never use `==` for sentinels).
 TIMEOUT = object()
 
 

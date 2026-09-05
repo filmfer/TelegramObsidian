@@ -11,6 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test:token")
 os.environ.setdefault("LLM_API_KEY", "test-key")
+# Vault must live in a temp dir: the default /data/vault is the container
+# bind-mount contract and is read-only/nonexistent on dev machines.
+os.environ["OBSIDIAN_VAULT_PATH"] = tempfile.mkdtemp(prefix="agent_test_vault_")
 
 PASS, FAIL = "✅", "❌"
 results = []

@@ -8,7 +8,10 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-from llm.provider import AllProvidersFailedError, chat
+# NOTE: only `chat` is imported here — the provider-specific exceptions
+# (AllProvidersFailedError, ProviderRateLimitError) are raised through and
+# handled by bot.py's analyze_and_save, not in this module.
+from llm.provider import chat
 
 logger = logging.getLogger(__name__)
 

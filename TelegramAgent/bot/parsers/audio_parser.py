@@ -27,6 +27,18 @@ DEFAULT_MAX_GROQ_MB = int(os.getenv("AUDIO_MAX_GROQ_MB", "24"))
 # Segment length for long files (seconds → 15 min by default).
 DEFAULT_SEGMENT_SECONDS = int(os.getenv("AUDIO_SEGMENT_SECONDS", "900"))
 
+# MIME types Groq's Whisper endpoint accepts without complaint. Anything
+# else is pre-converted to MP3 before upload (see transcribe_audio).
+_GROQ_SAFE_MIME_TYPES = frozenset({
+    "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4",
+    "audio/x-m4a", "audio/webm", "audio/flac",
+})
+
+# File extensions that pair with the safe MIME types. Both checks must
+# pass for the file to skip ffmpeg — OGG/Opus containers (.oga/.opus/.ogg)
+# are intentionally excluded because Groq intermittently rejects them.
+_GROQ_SAFE_EXTENSIONS = frozenset({".mp3", ".wav", ".m4a", ".webm", ".flac"})
+
 
 class TranscriptionError(Exception):
     """Raised when audio transcription fails for a known reason."""
@@ -84,17 +96,21 @@ async def transcribe_audio(file_path: str, language: Optional[str] = None) -> st
     mime = mimetypes.guess_type(path.name)[0] or ""
     upload = path
 
-    # Groq rejects some containers/codecs (e.g. some Opus/OGG) with HTTP 400.
-    # Pre-convert anything risky to MP3 and send the correctly-named file.
+    # --- Groq format gate -------------------------------------------------
+    # Groq rejects some audio containers/codecs (notably certain Opus/OGG
+    # variants, which is exactly what Telegram voice messages use) with an
+    # HTTP 400. To be robust, we convert anything that is not *provably*
+    # safe: both the MIME type AND the file extension must be in the
+    # whitelists below, otherwise the file goes through ffmpeg first.
+    #
+    # NOTE: .oga/.opus/.ogg are deliberately NOT in _GROQ_SAFE_EXTENSIONS —
+    # Telegram voice notes arrive as .oga, and "the upload succeeded last
+    # time" is not a guarantee with Groq's codec handling. A failed ffmpeg
+    # conversion falls back to sending the raw file (see _convert_to_mp3).
     if (
-        mime not in ("audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4",
-                     "audio/x-m4a", "audio/webm", "audio/flac", "audio/ogg")
+        mime not in _GROQ_SAFE_MIME_TYPES
         or Path(path.name).suffix.lower() not in _GROQ_SAFE_EXTENSIONS
     ):
-        converted = _convert_to_mp3(str(path))
-        if converted:
-            upload = Path(converted)
-    elif mime == "audio/ogg" and Path(path.name).suffix.lower() in (".oga", ".opus", ".ogg"):
         converted = _convert_to_mp3(str(path))
         if converted:
             upload = Path(converted)

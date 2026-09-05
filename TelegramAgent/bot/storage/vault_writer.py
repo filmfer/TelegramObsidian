@@ -1,3 +1,17 @@
+"""Vault persistence: write AI-generated notes safely to the Obsidian vault.
+
+This is the ONLY module that touches the vault filesystem. Three invariants:
+
+1. Path safety — every category/filename passes through _SAFE_CHARS/_TRAVERSAL
+   sanitization, so a hostile LLM output can never escape the vault root
+   (path-traversal defense).
+2. Single source of truth — get_vault_root() resolves OBSIDIAN_VAULT_PATH
+   (default ``/data/vault``, the docker-compose bind-mount contract).
+3. Fail loudly — warn_if_not_mountpoint() logs CRITICAL at startup if the
+   default root is not actually a mountpoint; notes would otherwise land in
+   the container's ephemeral layer and vanish on the next rebuild while the
+   bot still reports success.
+"""
 import logging
 import os
 import re

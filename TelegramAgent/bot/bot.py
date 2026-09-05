@@ -38,10 +38,9 @@ from parsers.audio_parser import (
     TranscriptionError,
     transcribe_audio,
     transcribe_audio_long,
-    transcribe_audio_local,
 )
 from parsers.search_parser import search_web
-from parsers.image_parser import ocr_image, vision_extract
+from parsers.image_parser import vision_extract
 from parsers.handwriting_parser import (
     save_handwriting_reference,
     transcribe_handwritten,
@@ -97,6 +96,7 @@ from storage.dedup_store import (
 )
 from notifications import (
     StatusMessage,
+    TIMEOUT,
     on_error,
     run_with_deadline,
     setup_error_logging,
@@ -558,7 +558,9 @@ async def _document_image_job(update, context, document, status):
         prev_model = get_current_model()
         attachments = [attachment_rel] if attachment_rel else []
         await status.update("🧠 Interpreting image content…")
-        result = await analyze_and_save(
+        # analyze_and_save() sends its own "✅ Saved" / duplicate replies;
+        # its return value needs no handling here.
+        await analyze_and_save(
             update,
             context,
             extracted,
@@ -680,7 +682,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- /learn two-step: photo with /learn, then plain text = reference ---
     if context.user_data.get("_hw_pending_ref"):
         img_path = context.user_data.pop("_hw_pending_ref", None)
-        token = context.user_data.pop("_hw_pending_token", None)
         try:
             saved = await asyncio.to_thread(
                 save_handwriting_reference, img_path, text
@@ -727,7 +728,6 @@ async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = None
     if update.message and update.message.photo:
         photo = update.message.photo[-1]
-    caption = (update.message.caption or "").strip() if update.message else ""
     if not photo:
         await update.message.reply_text(
             "✍️ To teach me your handwriting, send a PHOTO of a handwritten note "
@@ -779,6 +779,10 @@ async def text_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ids = [it["id"] for it in items]
     result = None
     try:
+        # run_with_deadline() returns the TIMEOUT sentinel (never raises for
+        # timeouts) — see notifications.py for why it's an object() compared
+        # with `is`. On timeout we return EARLY, deliberately skipping the
+        # queue cleanup below, so the items stay queued for a later /text.
         result = await run_with_deadline(
             status, _text_note_job(update, context, combined[:12000], detail, status)
         )
@@ -830,6 +834,8 @@ async def voice_note_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ids = [it["id"] for it in items]
     result = None
     try:
+        # Same timeout contract as the text queue above: TIMEOUT → early
+        # return so queued voice items survive for a later /voice retry.
         result = await run_with_deadline(status, _voice_queue_job(update, context, items, status))
         if result is TIMEOUT:
             logger.warning("Queue[voice] chat=%s: timed out — items kept for retry", chat_id)
@@ -950,7 +956,9 @@ async def organize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plan = await asyncio.to_thread(
             build_merge_plan, VAULT_PATH, make_keyword_suggester()
         )
-    except Exception as e:
+    except Exception:
+        # logger.exception() already captures the active exception — binding
+        # it to `as e` would be redundant clutter.
         logger.exception("Failed to build organize plan")
         await status.fail(
             "Could not read the vault (this often happens when the rclone "
@@ -1960,7 +1968,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not photos:
         await update.message.reply_text("❌ No image received.")
         return
-    photo = photos[-1]  # largest available size
+    # NB: we don't keep `photos[-1]` here — _photo_job() re-reads the album
+    # from update.message, so a local reference would be dead code.
 
     status = StatusMessage(await update.message.reply_text("🖼️ Reading image…"))
     await run_with_deadline(
@@ -2159,7 +2168,10 @@ async def _photo_job(update, context, messages, status, caption: str = ""):
         if await _reject_duplicate(update, fingerprint, force):
             return
 
-        attachment_rel = _save_attachment(paths[0]) if len(paths) == 1 else None
+        # NB: attachments are saved once, further below, via _save_attachments()
+        # (which also feeds analyze_and_save). Saving here as well would copy
+        # the same file twice and leave an orphan in 90_Attachments when the
+        # handwritten route (which embeds no attachment) returns early.
         detail = derive_detail_level(caption) if caption else "detailed"
         if image_cmd:
             detail = "detailed"
@@ -2188,11 +2200,12 @@ async def _photo_job(update, context, messages, status, caption: str = ""):
         source_name = Path(paths[0]).name
         source_label = "photograph" if len(paths) == 1 else f"album of {len(paths)} photos"
         # Attach ALL originals to the note (gallery embeds in Obsidian)
-        attachment_rel = None
         attachments = _save_attachments(paths)
 
     await status.update("🧠 Interpreting image content…")
-    result = await analyze_and_save(
+    # analyze_and_save() sends its own "✅ Saved" / duplicate replies;
+    # its return value needs no handling here.
+    await analyze_and_save(
         update,
         context,
         extracted,

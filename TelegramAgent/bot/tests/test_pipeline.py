@@ -10,10 +10,18 @@ Run:
 """
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Ensure the bot package root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Point the vault at a throwaway temp dir BEFORE importing bot modules.
+# vault_writer resolves OBSIDIAN_VAULT_PATH at call time, but its default
+# ("/data/vault") only exists inside the container — on a dev machine the
+# filesystem root is read-only, so tests must override it up front.
+_test_vault = tempfile.mkdtemp(prefix="agent_test_vault_")
+os.environ["OBSIDIAN_VAULT_PATH"] = _test_vault
 
 from parsers.document_parser import parse_document
 from parsers.book_parser import (

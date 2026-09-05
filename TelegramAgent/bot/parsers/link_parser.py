@@ -1,3 +1,11 @@
+"""Async web-page scraping for link notes (trafilatura + httpx).
+
+Security-relevant module: every outbound fetch goes through the SSRF guard
+(`_is_blocked` + _BLOCKED_NETWORKS) which resolves the hostname and rejects
+private, loopback, link-local, and reserved IP ranges — otherwise a crafted
+URL could make the bot probe the VPS's internal network (cloud metadata
+endpoints, docker bridges, etc.).
+"""
 from __future__ import annotations
 
 import asyncio

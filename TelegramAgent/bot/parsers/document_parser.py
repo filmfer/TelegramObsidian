@@ -1,3 +1,10 @@
+"""Document text extraction: PDF, DOCX, XLSX, TXT, JSON, MD, CSV, EML.
+
+Every extractor is *pure* — it takes a filesystem path and returns plain
+text — so parsers can be unit-tested without Telegram or network access.
+`extract_document_text()` is the single entry point bot.py calls; it
+dispatches on file extension and raises ValueError for unsupported types.
+"""
 from __future__ import annotations
 
 import logging
