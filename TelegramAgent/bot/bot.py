@@ -81,6 +81,13 @@ from storage.vault_writer import (
 )
 from storage.vault_organizer import apply_merge, build_merge_plan, make_keyword_suggester
 from storage.dashboard import write_dashboard
+from storage.emergency_export import (
+    export_all,
+    export_root,
+    mirror_note,
+    note_write_lag,
+    scan_hazardous_notes,
+)
 from storage.dedup_store import (
     acheck_duplicate,
     arecord_processed,
@@ -236,6 +243,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "LLM models: /models\n"
         "/disk — check vault disk space\n"
         "/vault — verify vault sync health (rclone mount + write test)\n"
+        "/vaultsync — deep sync check (mountpoint, write, hazards)\n"
+        "/syncstatus — estado do watchdog de sync imediato p/ GDrive\n"
+        "/syncstatus force — força rclone copy completo ao Drive\n"
+        "/export — snapshot do vault ao volume persistente\n"
         "/organize preview — tidy sparse categories into broad ones (plan only)\n"
         "/organize — apply the proposed category merges (asks confirmation)\n"
         "/dashboard — rebuild the \"Recent Notes\" note (newest per category)\n\n"
@@ -306,17 +317,239 @@ async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Vault note-count check failed: {e}")
 
+    # 5. Emergency-export mirror status (v1.12 safety net)
+    try:
+        mirrored_count = export_root()
+        n = sum(1 for _ in mirrored_count.rglob("*.md")) if mirrored_count.is_dir() else 0
+        checks.append(f"🛟 Emergency mirror: {n} notes" if mirrored_count.is_dir() else "🛟 Emergency mirror: not initialized")
+    except Exception as e:
+        logger.warning(f"Emergency mirror status check failed: {e}")
+
+    # 6. Hazardous dirs inside the vault (secrets synced to Drive risk)
+    try:
+        hazards = scan_hazardous_notes(VAULT_PATH)
+        if hazards:
+            healthy = False
+            checks.append(
+                f"🚨 Hazardous dir inside vault: {', '.join(hazards)} — "
+                "may contain secrets (.env/rclone.conf) being synced to Drive. "
+                "Remove them from the vault and rotate the credentials."
+            )
+    except Exception as e:
+        logger.warning(f"Hazard scan failed: {e}")
+
     # Build response
     status = "✅ HEALTHY" if healthy else "❌ ISSUES FOUND"
     response = f"🏥 Vault Health: {status}\n\n" + "\n".join(checks)
 
     if not healthy:
         response += (
-            "\n\n🔧 Fix: restart container to refresh bind mount:\n"
-            "  docker compose restart"
+            "\n\n🔧 If the vault/sync is the issue, on the HOST run:\n"
+            "  mount | grep rclone\n"
+            "  systemctl status rclone-gdrive --no-pager | head\n"
+            "  docker inspect obsidian-agent --format '{{range .Mounts}}{{.Source}}->{{.Destination}} {{end}}'\n"
+            "  rclone ls gdrive: --max-depth 1\n"
         )
 
     await update.message.reply_text(response)
+
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual /export — mirror the whole vault into the persistent volume."""
+    chat_id = update.effective_chat.id
+    if TELEGRAM_CHAT_ID is not None and chat_id != TELEGRAM_CHAT_ID:
+        return  # not the owner chat — ignore silently
+    await update.message.reply_text("📦 Exporting vault snapshot to persistent volume…")
+    try:
+        result = await asyncio.to_thread(export_all)
+        if result["errors"]:
+            await update.message.reply_text(
+                f"🛟 Export finished with {len(result['errors'])} error(s): "
+                f"{result['files']} files, {result['bytes']} bytes total.\n"
+                f"First error: {result['errors'][0]}"
+            )
+        else:
+            await update.message.reply_text(
+                f"🛟 Export complete: {result['files']} files, "
+                f"{(result['bytes'] / 1048576):.1f} MB → {export_root()}"
+            )
+    except Exception as e:
+        logger.error(f"Export command failed: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Export failed: {e}")
+
+
+async def vaultsync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deeper /vaultsync health: mount, write test, note lag, hazards, host hints."""
+    chat_id = update.effective_chat.id
+    if TELEGRAM_CHAT_ID is not None and chat_id != TELEGRAM_CHAT_ID:
+        return  # not the owner chat — ignore silently
+
+    await update.message.reply_text("🔍 Running vault-sync deep check…")
+
+    lines: List[str] = []
+    issues = 0
+
+    # A. Is /data/vault an actual mountpoint?
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            is_mount = any(
+                len(p) > 1 and p[1] == str(Path(VAULT_PATH))
+                for p in (line.split() for line in f)
+            )
+        lines.append(f"🔗 Mountpoint /data/vault: {'✅ yes' if is_mount else '❌ no'}")
+        if not is_mount:
+            issues += 1
+            lines.append("   → notes would sit in the container layer, never reaching Drive")
+    except FileNotFoundError:
+        lines.append("ℹ️  /proc/mounts unavailable (local dev) — skipping mountpoint check")
+
+    # B. Write test
+    try:
+        probe = Path(VAULT_PATH) / f".sync_probe_{int(time.time())}.txt"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        lines.append("✍️  Write test: ✅")
+    except Exception as e:
+        issues += 1
+        lines.append(f"✍️  Write test: ❌ {e}")
+
+    # C. How many notes in the last 24h?
+    recent = await asyncio.to_thread(note_write_lag, 1)
+    lines.append(f"📝 Notes written in last 24h: {recent}")
+    if recent == 0:
+        issues += 1
+        lines.append("   → filter may be 0 for legit reasons; if you DID send notes see above")
+
+    # D. Hazardous dirs (secrets synced to Drive)
+    try:
+        hazards = scan_hazardous_notes(VAULT_PATH)
+        if hazards:
+            issues += 1
+            lines.append(
+                f"🚨 Hazard: {', '.join(hazards)} inside vault — "
+                "∘ .env / rclone.conf could be exposed on Google Drive"
+            )
+        else:
+            lines.append("🧹 No hazardous dirs found inside the vault")
+    except Exception as e:
+        logger.warning(f"Hazard scan failed: {e}")
+
+    verdict = "✅ SYNC HEALTHY" if issues == 0 else f"⚠️ {issues} issue(s)"
+    response = f"🧭 VaultSync: {verdict}\n\n" + "\n".join(lines)
+
+    if issues:
+        response += (
+            "\n\n🔧 On the HOST, realign the chain:\n"
+            "  mount | grep rclone\n"
+            "  systemctl status rclone-gdrive --no-pager | head\n"
+            "  docker inspect obsidian-agent --format "
+            "'{{range .Mounts}}{{.Source}}->{{.Destination}} {{\"\\n\"}}{{end}}'\n"
+            "  # if bind source ≠ rclone mount point:\n"
+            "  #   add OBSIDIAN_VAULT_HOST_PATH=<rclone mount> to .env\n"
+            "  docker compose up -d\n"
+        )
+    await update.message.reply_text(response, disable_web_page_preview=True)
+
+
+async def syncstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Report the immediate-sync watchdog health; optionally force a full push.
+
+    /syncstatus            → show watchdog + mount status
+    /syncstatus force      → run a full `rclone copy` of the vault to Drive
+
+    Notes: the bot runs on the same Ubuntu host as the rclone mount, so it can
+    inspect the local systemd service and invoke rclone directly.
+    """
+    chat_id = update.effective_chat.id
+    if TELEGRAM_CHAT_ID is not None and chat_id != TELEGRAM_CHAT_ID:
+        return  # not the owner chat — ignore silently
+
+    text = (update.message.text or "").strip().lower()
+    force = "force" in text
+
+    await update.message.reply_text("🔎 Checking immediate-sync watchdog…")
+
+    lines: List[str] = []
+    issues = 0
+    import shutil
+    import subprocess
+
+    # 1. Service active?
+    svc = "sync-immediate"
+    if shutil.which("systemctl"):
+        try:
+            out = subprocess.run(
+                ["systemctl", "is-active", svc], capture_output=True, text=True, timeout=10
+            ).stdout.strip()
+        except Exception as e:
+            out = f"error:{e}"
+        ok = out in ("active", "activating")
+        lines.append(f"🛡️  Watchdog {svc}: {'✅ active' if ok else f'❌ {out}'}")
+        if not ok:
+            issues += 1
+            lines.append("   → restart:  systemctl restart sync-immediate")
+    else:
+        lines.append("ℹ️  systemctl not available — watchdog status unknown")
+
+    # 2. Last sync activity from the watchdog log
+    log = "/var/log/sync-immediate.log"
+    if Path(log).exists():
+        try:
+            tail = subprocess.run(
+                ["tail", "-3", log], capture_output=True, text=True, timeout=10
+            ).stdout.strip().splitlines()
+            if tail:
+                lines.append("📜 Last watchdog entries:")
+                lines.extend(f"    {t}" for t in tail)
+        except Exception as e:
+            lines.append(f"⚠️  Could not read {log}: {e}")
+    else:
+        lines.append("ℹ️  No watchdog log yet — service may not have written")
+
+    # 3. Mountpoint present?
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            is_mount = any(
+                len(p) > 1 and p[1] == str(Path(VAULT_PATH))
+                for p in (line.split() for line in f)
+            )
+        lines.append(f"🔗 Mountpoint {VAULT_PATH}: {'✅' if is_mount else '❌ missing'}")
+        if not is_mount:
+            issues += 1
+    except FileNotFoundError:
+        lines.append("ℹ️  /proc/mounts unavailable (local dev)")
+
+    # 4. Optional: force a full push
+    if force:
+        lines.append("🚀 Full sync requested — running rclone copy…")
+        import asyncio
+        proc = await asyncio.create_subprocess_exec(
+            "rclone", "copy", VAULT_PATH, "gdrive:",
+            "--config", "/root/.config/rclone/rclone.conf",
+            "--transfers", "6",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        await proc.wait()
+        tail_out = (proc.stdout and await proc.stdout.read()) or b""
+        last = "\n".join(tail_out.decode("utf-8", "ignore").splitlines()[-4:])
+        lines.append("✔  rclone copy finished.")
+        if last:
+            lines.append("```")
+            lines.extend(last.splitlines())
+            lines.append("```")
+
+    verdict = "✅ immediate-sync OK" if issues == 0 else f"⚠️ {issues} issue(s)"
+    response = f"⚡ SyncStatus: {verdict}\n\n" + "\n".join(lines)
+
+    if issues:
+        response += (
+            "\n\n🔧 On the HOST:\n"
+            "  systemctl restart sync-immediate\n"
+            "  tail -f /var/log/sync-immediate.log\n"
+        )
+    await update.message.reply_text(response, parse_mode="Markdown",
+                                    disable_web_page_preview=True)
 
 
 async def set_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1569,6 +1802,7 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
         if not note_path:
             await status.edit_text("❌ Could not write to Obsidian vault.")
             return
+        await asyncio.to_thread(mirror_note, note_path)  # v1.12 safety net
         if fingerprint:
             await arecord_processed(fingerprint, "book", source, note_path)
 
@@ -1663,6 +1897,9 @@ async def analyze_and_save(
     if not note_path:
         await update.message.reply_text("❌ Could not write to Obsidian vault.")
         raise OSError("Could not write to vault")
+    # v1.12 safety net: mirror the note into the persistent agent-data volume so
+    # a broken rclone/mount chain can never lose it.
+    await asyncio.to_thread(mirror_note, note_path)
 
     if fingerprint:
         await arecord_processed(fingerprint, source_type, source, note_path)
@@ -1852,6 +2089,9 @@ def main():
     app.add_handler(CommandHandler("models", models_command))
     app.add_handler(CommandHandler("disk", disk_command))
     app.add_handler(CommandHandler("vault", vault_command))
+    app.add_handler(CommandHandler("vaultsync", vaultsync_command))
+    app.add_handler(CommandHandler("syncstatus", syncstatus_command))
+    app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("text", text_note_command))
     app.add_handler(CommandHandler("voice", voice_note_command))
     app.add_handler(CommandHandler("audio", voice_note_command))

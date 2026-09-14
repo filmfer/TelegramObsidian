@@ -1,0 +1,21 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Memory Bank Sync",
+      "type": "shell",
+      "command": "git",
+      "args": ["-C", "${env:HOME}/cline-memory-bank", "pull", "--rebase"],
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "showMessage": false,
+        "clear": true
+      },
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

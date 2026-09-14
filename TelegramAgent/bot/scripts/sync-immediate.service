@@ -1,0 +1,15 @@
+[Unit]
+Description=Sync immediate notes to Google Drive via polling watchdog
+After=rclone-gdrive.service
+Requires=rclone-gdrive.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sync_immediate.sh
+Restart=always
+RestartSec=5
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
