@@ -1,79 +1,97 @@
 """Multi-provider LLM layer.
 
 Features:
-  - Unified completion through litellm with a fallback chain
-  - Dynamic model discovery (Gemini / Groq / OpenRouter / Ollama)
+  - Unified completion through litellm with a size- and health-aware
+    fallback chain: chosen model → LLM_FALLBACKS → free-model pool
+  - Error classification (llm/errors.py) + per-model health (llm/health.py):
+    cool-downs, dead models, rejected keys, learned request-size ceilings
+  - Waits out short rate limits when the caller allows it (max_wait)
+  - Dynamic model discovery (Gemini / Groq / OpenRouter / Ollama) with
+    context sizes, refreshed lazily every 24h
   - Persistent runtime config (chosen model, cached catalog) in config.json
-  - Auto-switching health check used by the weekly Telegram job
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from llm.errors import ClassifiedError, ErrorKind, classify_error, estimate_tokens
+from llm.free_pool import AUTO_MODEL, context_of, free_pool, is_free
+from llm.health import HEALTH
+
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(os.getenv("AGENT_CONFIG_PATH", "config.json"))
+# Runtime config lives in <bot dir>/data/ — the `agent-data` Docker volume —
+# so the chosen model survives `docker compose up --build`. The old default
+# (cwd/config.json = /app, the image layer) was wiped on every rebuild.
+_BOT_DIR = Path(__file__).resolve().parent.parent
+CONFIG_PATH = Path(os.getenv("AGENT_CONFIG_PATH", str(_BOT_DIR / "data" / "config.json")))
+_LEGACY_CONFIG_PATH = _BOT_DIR / "config.json"  # read-only fallback for one-time migration
 
-# Static defaults; the weekly/startup health check replaces these
-# automatically if the configured model disappears.
+# LLM_MODEL: a litellm model id, or "auto" (free pool first, see llm/free_pool.py).
 DEFAULT_MODEL = os.getenv("LLM_MODEL", "gemini/gemini-flash-latest")
+# LLM_FALLBACKS: models you explicitly want tried right after LLM_MODEL (e.g. a
+# paid model). The free pool is appended automatically — no need to list it.
 DEFAULT_FALLBACKS = [
-    m.strip()
-    for m in os.getenv(
-        "LLM_FALLBACKS",
-        "groq/openai/gpt-oss-120b,groq/llama-3.1-8b-instant,"
-                "openrouter/deepseek/deepseek-chat:free,zai/glm-4-flash,"
-        "gemini/gemini-pro-latest",
-    ).split(",")
-    if m.strip()
+    m.strip() for m in os.getenv("LLM_FALLBACKS", "").split(",") if m.strip()
 ]
 
 # Name fragments that usually indicate cheaper/free-tier models
 _FREE_HINTS = ("flash", "mini", "small", "free", "nitro", "8b")
 
-MODEL_ERROR_PATTERNS = (
-    "model_not_found",
-    "does not exist",
-    "is not found",
-    "not supported",
-    "decommissioned",
-    "404",
-)
+CATALOG_TTL_SECONDS = 24 * 3600
+_MIN_OUTPUT_TOKENS = 256
+_SAFETY_TOKENS = 64  # slack between estimated and real token counts
 
 
 class AllProvidersFailedError(Exception):
-    """Raised when every model in the fallback chain failed."""
+    """Raised when every model in the fallback chain failed.
 
-    def __init__(self, message: str, attempts: Optional[List[Dict[str, str]]] = None):
+    ``too_large`` is True when request size was (part of) the reason — the
+    caller can split the input and retry; resending the same size can't work.
+    """
+
+    def __init__(self, message: str, attempts: Optional[List[Dict[str, str]]] = None,
+                 too_large: bool = False):
         super().__init__(message)
         self.attempts = attempts or []
+        self.too_large = too_large
 
 
 class ProviderRateLimitError(Exception):
-    """Raised when the primary provider and fallbacks are failing due to Rate Limits / Quotas."""
-    def __init__(self, message: str, provider: str = "Unknown"):
+    """Raised when every candidate is rate-limited / out of quota (or cooling down)."""
+    def __init__(self, message: str, provider: str = "Unknown",
+                 retry_in: Optional[float] = None):
         super().__init__(message)
         self.provider = provider
+        self.retry_in = retry_in
 
 
 # ---------------------------------------------------------------- config ---
 
 def _load_config() -> Dict[str, Any]:
+    # Fall back to the legacy location once; the next _save_config writes the new path.
+    path = CONFIG_PATH if CONFIG_PATH.exists() or not _LEGACY_CONFIG_PATH.exists() else _LEGACY_CONFIG_PATH
     try:
-        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        logger.warning("Could not read config %s: %s — using defaults", path, e)
         return {}
 
 
 def _save_config(cfg: Dict[str, Any]) -> None:
     try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(
             json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -129,50 +147,44 @@ def _provider_from_model(model: str) -> str:
     return prefix
 
 
-_RATE_LIMIT_HINTS = (
-    "429",
-    "quota",
-    "rate limit",
-    "too many requests",
-    "insufficient_quota",
-    "queries per day",
-)
+def _list_gemini_sync() -> Tuple[List[str], Dict[str, dict]]:
+    """Blocking google-genai listing — run via asyncio.to_thread."""
+    from google import genai
 
-
-def _is_rate_limit_error(text: str) -> bool:
-    """True when an error string indicates a quota/rate-limit condition."""
-    t = text.lower()
-    return any(h in t for h in _RATE_LIMIT_HINTS)
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+    names, info = [], {}
+    for m in client.models.list():
+        actions = getattr(m, "supported_actions", None) or ["generateContent"]
+        if "generateContent" not in actions:
+            continue
+        name = "gemini/" + m.name.replace("models/", "", 1)
+        names.append(name)
+        ctx = getattr(m, "input_token_limit", None)
+        if ctx:
+            info[name] = {"ctx": int(ctx)}
+    return sorted(set(names)), info
 
 
 async def list_available_models() -> Dict[str, List[str]]:
     """
     Query every configured provider for its live model catalog.
-    Returns {provider_prefix: ["provider/model", ...]}.
+    Returns {provider_prefix: ["provider/model", ...]} and caches it together
+    with per-model context sizes ({model: {"ctx": tokens}}) in config.json.
     Providers without credentials or unreachable are omitted.
     """
     catalog: Dict[str, List[str]] = {}
+    info: Dict[str, dict] = {}
 
-    # --- Google Gemini ---
+    # --- Google Gemini --- (sync SDK: keep it off the event loop)
     if _provider_ready("gemini"):
         try:
-            from google import genai
-
-            client = genai.Client(
-                api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-            )
-            names = []
-            for m in client.models.list():
-                actions = getattr(m, "supported_actions", None) or ["generateContent"]
-                if "generateContent" not in actions:
-                    continue
-                name = m.name.replace("models/", "", 1)
-                names.append(f"gemini/{name}")
-            catalog["gemini"] = sorted(set(names))
+            names, ginfo = await asyncio.wait_for(asyncio.to_thread(_list_gemini_sync), 20)
+            catalog["gemini"] = names
+            info.update(ginfo)
         except Exception as e:
             logger.warning(f"Gemini model listing failed: {e}")
 
-    # --- Groq ---
+    # --- Groq --- (every chat model is on the free tier)
     if _provider_ready("groq"):
         try:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -181,11 +193,15 @@ async def list_available_models() -> Dict[str, List[str]]:
                     headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
                 )
                 r.raise_for_status()
-                catalog["groq"] = sorted(
-                    f"groq/{m['id']}"
-                    for m in r.json().get("data", [])
-                    if any(t in m["id"] for t in ("llama", "gemma", "qwen"))
-                )
+                models = []
+                for m in r.json().get("data", []):
+                    name = f"groq/{m['id']}"
+                    if not is_free(name) or m.get("active") is False:
+                        continue  # whisper/guard/tts are not chat models
+                    models.append(name)
+                    if m.get("context_window"):
+                        info[name] = {"ctx": int(m["context_window"])}
+                catalog["groq"] = sorted(models)
         except Exception as e:
             logger.warning(f"Groq model listing failed: {e}")
 
@@ -197,13 +213,17 @@ async def list_available_models() -> Dict[str, List[str]]:
                 headers["Authorization"] = f"Bearer {os.getenv('OPENROUTER_API_KEY')}"
             r = await client.get("https://openrouter.ai/api/v1/models", headers=headers)
             r.raise_for_status()
-            free_ids = [
-                m["id"]
-                for m in r.json().get("data", [])
-                if ":free" in m.get("id", "")
-            ]
-            if free_ids:
-                catalog["openrouter"] = sorted(f"openrouter/{i}" for i in free_ids)
+            free = []
+            for m in r.json().get("data", []):
+                mid = m.get("id", "")
+                if not mid.endswith(":free"):
+                    continue
+                name = f"openrouter/{mid}"
+                free.append(name)
+                if m.get("context_length"):
+                    info[name] = {"ctx": int(m["context_length"])}
+            if free:
+                catalog["openrouter"] = sorted(free)
     except Exception as e:
         logger.debug(f"OpenRouter model listing skipped: {e}")
 
@@ -220,7 +240,7 @@ async def list_available_models() -> Dict[str, List[str]]:
         except Exception:
             logger.debug("Ollama not reachable — skipped.")
 
-    _set_catalog(catalog)
+    _set_catalog(catalog, info)
     total = sum(len(v) for v in catalog.values())
     logger.info(f"Model catalog refreshed: {total} models across {len(catalog)} providers")
     return catalog
@@ -262,7 +282,8 @@ async def validate_and_autoswitch() -> Optional[str]:
     flat = [m for lst in catalog.values() for m in lst]
     current = get_current_model()
 
-    if current in flat:
+    # "auto" has no fixed model; providers without a listing API (zai) can't be checked.
+    if current == AUTO_MODEL or current in flat or _provider_from_model(current) not in catalog:
         return None
 
     replacement = pick_replacement(catalog, current)
@@ -284,69 +305,185 @@ async def validate_and_autoswitch() -> Optional[str]:
 
 # ------------------------------------------------------------ completion ---
 
-async def chat(system_prompt: str, user_content: str, max_tokens: int = 8192) -> tuple:
-    """
-    Run a completion trying the current model first, then fallbacks.
+def candidate_models() -> List[str]:
+    """Ordered candidates before health/size filtering.
 
-    - Only providers with credentials are attempted (skips dead/no-key noise).
-    - If ALL attempted models fail with quota/rate-limit → raises
-      ProviderRateLimitError (so the bot tells the user to wait or add a key).
-    - Any other mix of failures → AllProvidersFailedError with a per-model
-      summary so the caller can show exactly what happened.
-    - On successful fallback the working model becomes the new current model
-      (persisted), so the quota-trapped model isn't tried again on the next call.
-    Returns (text, meta_info) where meta_info = {"model": ..., "usage": ...}.
+    Fixed model:  chosen model → LLM_FALLBACKS → free pool.
+    Auto mode:    free pool → LLM_FALLBACKS (paid models only as last resort).
     """
     current = get_current_model()
-    all_models = [current] + [m for m in get_fallbacks(current) if m != current]
-    # Only try providers we actually have credentials for.
-    chain = [m for m in all_models if _provider_ready(_provider_from_model(m))]
-    if not chain:
-        chain = all_models  # provider-agnostic configs (custom base_url) stay usable
+    pool = free_pool(get_catalog(), get_models_info())
+    fallbacks = [m for m in DEFAULT_FALLBACKS if m != current]
+    ordered = pool + fallbacks if current == AUTO_MODEL else [current] + fallbacks + pool
+    seen, out = set(), []
+    for m in ordered:
+        if m not in seen and m != AUTO_MODEL:
+            seen.add(m)
+            out.append(m)
+    ready = [m for m in out if _provider_ready(_provider_from_model(m))]
+    return ready or out  # provider-agnostic configs (custom base_url) stay usable
 
-    attempts: List[Dict[str, str]] = []
 
-    for model in chain:
+def _request_limit(model: str) -> Optional[int]:
+    """Max request tokens (input + output) for a model: learned ceiling ∧ context."""
+    limits = [x for x in (HEALTH.max_request(model), context_of(model, get_models_info())) if x]
+    return min(limits) if limits else None
+
+
+def _fit_max_tokens(model: str, input_tokens: int, max_tokens: int) -> Optional[int]:
+    """Output budget that fits the model's limit, or None if the input can't fit."""
+    limit = _request_limit(model)
+    if limit is None:
+        return max_tokens
+    room = limit - input_tokens - _SAFETY_TOKENS
+    floor = min(max_tokens, max(_MIN_OUTPUT_TOKENS, max_tokens // 3))
+    return min(max_tokens, room) if room >= floor else None
+
+
+def plan_chain(input_tokens: int, max_tokens: int) -> Dict[str, Any]:
+    """Split candidates into ready / cooling / blocked-by-size for one request."""
+    ready: List[Tuple[str, int]] = []
+    cooling: Dict[str, float] = {}
+    size_blocked: List[str] = []
+    for m in candidate_models():
+        if not HEALTH.usable(m, _provider_from_model(m)):
+            continue
+        fitted = _fit_max_tokens(m, input_tokens, max_tokens)
+        if fitted is None:
+            size_blocked.append(m)
+            continue
+        left = HEALTH.cooldown_left(m)
+        if left > 0:
+            cooling[m] = left
+        else:
+            ready.append((m, fitted))
+    return {"ready": ready, "cooling": cooling, "size_blocked": size_blocked}
+
+
+_catalog_lock = asyncio.Lock()
+
+
+async def _maybe_refresh_catalog() -> None:
+    """Refresh the model catalog at most every CATALOG_TTL_SECONDS (never raises)."""
+    last = _load_config().get("last_model_check")
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds() if last else None
+    except ValueError:
+        age = None
+    if age is not None and age < CATALOG_TTL_SECONDS:
+        return
+    if _catalog_lock.locked():
+        return  # another request is refreshing; use the cached catalog meanwhile
+    async with _catalog_lock:
         try:
-            resp, usage_dict = await litellm_acompletion(
-                model=model,
-                system=system_prompt,
-                user=user_content,
-                max_tokens=max_tokens,
-            )
-            if resp:
-                # A fallback worked while the current model didn't → persist the
-                # switch so the next request doesn't waste a call on the dead quota.
-                if model != current:
-                    logger.info(f"Auto-switching current model to '{model}' (fallback succeeded)")
-                    set_current_model(model)
-                return resp, {"model": model, "usage": usage_dict}
-            attempts.append({"model": model, "error": "empty response"})
-        except Exception as e:
-            err = str(e).lower()
-            attempts.append({"model": model, "error": str(e)[:200]})
-            if any(p in err for p in MODEL_ERROR_PATTERNS):
-                logger.warning(f"Model '{model}' appears unavailable: {e}")
-                continue  # dead model — straight to next in chain
+            await asyncio.wait_for(list_available_models(), 45)
+        except Exception as e:  # discovery is best-effort; the chain works without it
+            logger.warning("Model catalog refresh failed: %s", e)
 
-            # Identify Quota / Rate limit
-            if _is_rate_limit_error(err):
-                logger.warning(f"Rate limit or Quota exceeded on '{model}': {e}")
-                continue  # keep trying fallbacks, but record this as a rate limit
 
-            logger.error(f"Completion failed on '{model}': {e}")
+async def chat(system_prompt: str, user_content: str, max_tokens: int = 8192,
+               *, max_wait: float = 0.0) -> tuple:
+    """
+    Run a completion over the fallback chain (see candidate_models()).
 
-    # Classify the failure mode.
-    rate_limits = [a for a in attempts if _is_rate_limit_error(a.get("error", ""))]
-    if len(rate_limits) == len(chain) and len(chain) > 0:
-        provider = current.split("/")[0] if "/" in current else current
+    - Each failure is classified (llm/errors.py) and remembered (llm/health.py):
+      cooling-down, dead and size-blocked models are skipped on later calls.
+    - max_tokens is shrunk per model to fit its known request limit, so a
+      Groq free-tier model (≈6–12k tokens/min) still gets a turn.
+    - TRANSIENT errors get one immediate retry on the same model.
+    - max_wait > 0: if every candidate is cooling down, sleep until the first
+      one recovers (bounded by max_wait) instead of failing — long jobs like
+      /book use this to ride out per-minute rate limits.
+    - The user's chosen model is never overwritten by a fallback.
+
+    Raises ProviderRateLimitError when only rate limits/quotas stand in the
+    way, otherwise AllProvidersFailedError (``too_large`` set when request
+    size was a factor). Returns (text, {"model", "usage", "fallback"}).
+    """
+    await _maybe_refresh_catalog()
+    input_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_content)
+    deadline = time.monotonic() + max(0.0, max_wait)
+    first_choice = get_current_model()
+    attempts: List[Dict[str, str]] = []
+    too_large = False
+
+    while True:
+        plan = plan_chain(input_tokens, max_tokens)
+        too_large = too_large or bool(plan["size_blocked"])
+        for model, fitted in plan["ready"]:
+            provider = _provider_from_model(model)
+            for attempt in (1, 2):
+                try:
+                    resp, usage_dict = await litellm_acompletion(
+                        model=model, system=system_prompt, user=user_content,
+                        max_tokens=fitted,
+                    )
+                    if not resp:
+                        raise _EmptyResponse("empty response")
+                except Exception as e:
+                    err = ClassifiedError(ErrorKind.EMPTY, message="empty response") \
+                        if isinstance(e, _EmptyResponse) else classify_error(e)
+                    if err.kind is ErrorKind.TRANSIENT and attempt == 1:
+                        await asyncio.sleep(2)
+                        continue  # one quick retry on the same model
+                    HEALTH.record_failure(model, provider, err, input_tokens + fitted)
+                    too_large = too_large or err.kind is ErrorKind.TOO_LARGE
+                    attempts.append({"model": model, "kind": err.kind.value, "error": err.message[:200]})
+                    log = logger.error if err.kind in (ErrorKind.AUTH, ErrorKind.UNKNOWN) else logger.warning
+                    log("LLM '%s' failed [%s]: %s", model, err.kind.value, err.message[:200])
+                    break
+                HEALTH.record_success(model)
+                if model != first_choice:
+                    logger.info("Fallback model '%s' answered (first choice: %s)", model, first_choice)
+                return resp, {"model": model, "usage": usage_dict, "fallback": model != first_choice}
+
+        # Nothing answered. Wait for the earliest cool-down if the caller allows it.
+        cooling = plan_chain(input_tokens, max_tokens)["cooling"]
+        if cooling:
+            wait = min(cooling.values()) + 1
+            if time.monotonic() + wait <= deadline:
+                logger.info("All candidates cooling down — waiting %.0fs", wait)
+                await asyncio.sleep(wait)
+                continue
+        break
+
+    kinds = {a["kind"] for a in attempts}
+    # Size problems win: the caller can split the input, waiting won't help.
+    if not too_large and (cooling or attempts) \
+            and kinds <= {ErrorKind.RATE_LIMIT.value, ErrorKind.QUOTA.value}:
+        retry_in = min(cooling.values()) if cooling else None
+        detail = attempts[0]["error"] if attempts else "all models are cooling down"
         raise ProviderRateLimitError(
-            f"Quota exceeded or Rate Limit hit on all configured providers "
-            f"({provider}). Details: {rate_limits[0].get('error')}",
-            provider=provider,
+            f"Rate limit / quota on every available model. Details: {detail}",
+            provider=_provider_from_model(first_choice), retry_in=retry_in,
         )
+    if not attempts:
+        attempts.append({"model": "-", "kind": "none",
+                         "error": "no usable model (too large, dead, or missing keys)"})
+    raise AllProvidersFailedError("All LLM providers failed.", attempts, too_large=too_large)
 
-    raise AllProvidersFailedError("All LLM providers failed.", attempts)
+
+class _EmptyResponse(Exception):
+    pass
+
+
+async def probe_models(models: List[str], timeout: float = 25) -> List[Dict[str, Any]]:
+    """Ping models concurrently with a tiny prompt; results feed HEALTH too."""
+    async def one(model: str) -> Dict[str, Any]:
+        t0 = time.monotonic()
+        try:
+            resp, _ = await asyncio.wait_for(
+                litellm_acompletion(model=model, system="Reply with OK.", user="ping", max_tokens=5),
+                timeout,
+            )
+            HEALTH.record_success(model)
+            return {"model": model, "ok": True, "secs": time.monotonic() - t0, "kind": ""}
+        except Exception as e:
+            err = classify_error(e)
+            HEALTH.record_failure(model, _provider_from_model(model), err, 50)
+            return {"model": model, "ok": False, "secs": time.monotonic() - t0, "kind": err.kind.value}
+
+    return list(await asyncio.gather(*(one(m) for m in models)))
 
 
 async def litellm_acompletion(
@@ -466,8 +603,14 @@ async def chat_vision(
     logger.error("All vision models failed (%s); chain=%s", last_error, chain)
     return None
 
-def _set_catalog(catalog: Dict[str, List[str]]) -> None:
+def _set_catalog(catalog: Dict[str, List[str]], info: Optional[Dict[str, dict]] = None) -> None:
     cfg = _load_config()
     cfg["models_catalog"] = catalog
+    if info is not None:
+        cfg["models_info"] = info
     cfg["last_model_check"] = datetime.now(timezone.utc).isoformat()
     _save_config(cfg)
+
+
+def get_models_info() -> Dict[str, dict]:
+    return _load_config().get("models_info", {})

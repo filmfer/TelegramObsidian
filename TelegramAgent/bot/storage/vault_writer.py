@@ -104,6 +104,19 @@ CATEGORY_MAP = {
 }
 
 DEFAULT_DETAIL = "detailed"
+_MAX_NAME_COLLISIONS = 100  # same-day same-title notes before giving up
+
+
+# Whole-word caption keywords, checked in order. Word boundaries stop ordinary
+# caption text from flipping the mode ("drawing" ≠ raw, "letras" ≠ handwritten).
+_DETAIL_PATTERNS = (
+    ("summarize", re.compile(r"\bsummar(?:y|ise|ize|ies)?\b")),
+    ("detailed", re.compile(r"\bdetail(?:s|ed)?\b")),
+    ("precise", re.compile(r"\bprecise\b")),
+    ("raw", re.compile(r"\braw\b")),
+    ("book", re.compile(r"\b(?:e-?)?books?\b")),
+    ("handwritten", re.compile(r"\bhandwrit\w*|\bmanuscrit\w*|à mão\b|\bletra\b")),
+)
 
 
 def derive_detail_level(caption: Optional[str]) -> str:
@@ -111,18 +124,9 @@ def derive_detail_level(caption: Optional[str]) -> str:
     if not caption:
         return DEFAULT_DETAIL
     cl = caption.strip().lower()
-    if "summar" in cl:
-        return "summarize"
-    if "detail" in cl:
-        return "detailed"
-    if "precise" in cl:
-        return "precise"
-    if "raw" in cl:
-        return "raw"
-    if "book" in cl:
-        return "book"
-    if "handwritten" in cl or "manuscrit" in cl or "escrito à mão" in cl or "à mão" in cl or "letra" in cl:
-        return "handwritten"
+    for level, pattern in _DETAIL_PATTERNS:
+        if pattern.search(cl):
+            return level
     return DEFAULT_DETAIL
 
 
@@ -157,8 +161,6 @@ def write_note_to_vault(note: Dict[str, Any]) -> Optional[str]:
     title = note.get("title", "Untitled")
     date_str = datetime.now().strftime("%Y-%m-%d")
     slug = _sanitize_component(title.lower().replace(" ", "-"), "untitled")[:50]
-    filename = f"{date_str}-{slug}.md"
-    file_path = folder_path / filename
 
     frontmatter = {
         "title": title,
@@ -189,11 +191,21 @@ def write_note_to_vault(note: Dict[str, Any]) -> Optional[str]:
 
     full_note = f"---\n{frontmatter_yaml}---\n\n{markdown_body}\n"
 
-    try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(full_note)
+    # Exclusive create ("x"): two notes with the same title on the same day
+    # get -2, -3… suffixes instead of the second silently overwriting the first.
+    for n in range(1, _MAX_NAME_COLLISIONS + 1):
+        suffix = "" if n == 1 else f"-{n}"
+        file_path = folder_path / f"{date_str}-{slug}{suffix}.md"
+        try:
+            with open(file_path, "x", encoding="utf-8") as f:
+                f.write(full_note)
+        except FileExistsError:
+            continue
+        except OSError as e:
+            logger.error("Failed to write note %s: %s", file_path, e)
+            return None
         logger.info(f"Note written to: {file_path}")
         return str(file_path.relative_to(vault_root))
-    except Exception as e:
-        logger.error(f"Failed to write note: {e}")
-        return None
+    logger.error("Failed to write note: %d files named %s-%s*.md already exist",
+                 _MAX_NAME_COLLISIONS, date_str, slug)
+    return None

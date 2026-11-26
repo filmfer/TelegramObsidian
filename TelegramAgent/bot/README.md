@@ -263,6 +263,8 @@ cd TelegramAgent/bot && docker compose up -d --build
   (private/reserved IP ranges blocked, DNS-resolved)
 - Path-traversal sanitization on every vault write and category name
 - `defusedxml` for untrusted XML (e-books, emails)
+- **Sender allowlist** — every update from an id outside `TELEGRAM_CHAT_ID` / `TELEGRAM_ALLOWED_USERS` is dropped silently; the bot refuses to start without one (unless `ALLOW_ANY_USER=true`)
+- Generic error replies to the user; exception details only in `logs/bot.log`
 - Per-user cooldown + Telegram `AIORateLimiter`
 - Non-root container user, no inbound ports (outbound polling only)
 
@@ -274,9 +276,20 @@ cd TelegramAgent/bot && docker compose up -d --build
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | **required** |
 | `GEMINI_API_KEY` / `GROQ_API_KEY` / `OPENROUTER_API_KEY` / `OLLAMA_HOST` | — | LLM providers (at least one) |
-| `LLM_MODEL` | `gemini/gemini-flash-latest` | preferred model (litellm format) |
-| `LLM_FALLBACKS` | see example | comma-separated fallback chain |
-| `TELEGRAM_CHAT_ID` | — | **your** chat id — restricts `/vault` to you and enables proactive disk alerts; **unset = `/vault` open to anyone and alerts off** |
+| `LLM_MODEL` | `gemini/gemini-flash-latest` | first-choice model (litellm format), or `auto` = best free model first |
+| `LLM_FALLBACKS` | — | optional models tried right after `LLM_MODEL`; the free pool is appended automatically |
+| `LLM_FREE_MODELS` | — | pin your own free-pool order (tried first within the pool) |
+| `LLM_FREE_POOL_MAX` | `10` | max free models tried per request |
+| `LLM_INTERACTIVE_MAX_WAIT` | `60` | seconds a note waits for a per-minute rate limit to reset |
+| `LLM_RATE_LIMIT_COOLDOWN` / `LLM_QUOTA_COOLDOWN` | `60` / `3600` | how long a rate-limited / quota-exhausted model is skipped |
+| `BOOK_CHUNK_CHARS` | `12000` | chapter text per LLM call (long chapters → parts; auto-halved on size errors) |
+| `BOOK_CHAPTER_MAX_TOKENS` | `1800` | output budget per chapter part |
+| `BOOK_MAX_WAIT_SECONDS` | `180` | per-chapter wait for rate limits before it counts as failed |
+| `BOOK_PROGRESS_DIR` | `data/book_progress` | finished-chapter checkpoints (re-send a paused book to resume) |
+| `TELEGRAM_CHAT_ID` | — | **required** — your chat id: always in the sender allowlist, receives proactive disk alerts |
+| `TELEGRAM_ALLOWED_USERS` | — | extra allowed Telegram user ids, comma-separated |
+| `ALLOW_ANY_USER` | `false` | `true` disables the allowlist (public bot) — not recommended |
+| `AGENT_CONFIG_PATH` | `data/config.json` | runtime state (chosen model, catalog); lives in the `agent-data` volume so it survives rebuilds |
 | `OBSIDIAN_VAULT_PATH` | `/data/vault` | vault path **inside** the container — **must** be set; without it notes are lost on rebuild |
 | `OBSIDIAN_VAULT_HOST_PATH` | `/srv/obsidian-vault` | host path bind-mounted into the container (where rclone mounts Google Drive) |
 | `DEDUP_DB_PATH` | `data/agent.db` | SQLite dedup + queue store |

@@ -506,7 +506,7 @@ OBSIDIAN_VAULT_PATH=../../ObsidianVault python -m tests.test_pipeline
    - [Google AI Studio](https://aistudio.google.com/apikey) → `GEMINI_API_KEY`
    - [Groq Console](https://console.groq.com) → `GROQ_API_KEY` (fastest free tier)
    - [OpenRouter](https://openrouter.ai/keys) → `OPENROUTER_API_KEY` (`:free` models)
-3. **Chat ID** — message your bot once, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy `message.chat.id` → `TELEGRAM_CHAT_ID`
+3. **Chat ID** — message your bot once, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy `message.chat.id` → `TELEGRAM_CHAT_ID` (**required** — the bot only answers ids in its allowlist; add more with `TELEGRAM_ALLOWED_USERS`)
 4. **Vault path** — point `OBSIDIAN_VAULT_HOST_PATH` at your Drive-mounted folder
 5. `docker compose up -d --build` and start sending content!
 

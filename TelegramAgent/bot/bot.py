@@ -19,8 +19,11 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
+
+from access_control import load_allowed_ids, make_guard, require_allowlist
 
 from parsers.document_parser import parse_document
 from parsers.link_parser import parse_link, parse_link_with_meta, download_thumbnail
@@ -66,12 +69,22 @@ from llm.provider import chat
 from llm.provider import (
     AllProvidersFailedError,
     ProviderRateLimitError,
-    _free_score,
-    get_catalog,
     get_current_model,
-    list_available_models,
     set_current_model,
     validate_and_autoswitch,
+)
+from llm.book_summarizer import BOOK_MAX_WAIT, summarize_chapter
+from model_menu import (
+    model_choice_callback,
+    model_tools_callback,
+    models_command,
+    offer_model_switch,
+)
+from storage.book_progress import (
+    clear_progress,
+    load_progress,
+    progress_key,
+    save_progress,
 )
 from storage.vault_writer import (
     derive_detail_level,
@@ -132,10 +145,11 @@ VAULT_PATH = get_vault_root()
 _chat_id_raw = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
 TELEGRAM_CHAT_ID = int(_chat_id_raw) if _chat_id_raw.isdigit() else None
 if TELEGRAM_CHAT_ID is None:
-    logger.warning(
-        "TELEGRAM_CHAT_ID not set — /vault is unlocked for any sender and "
-        "proactive disk alerts are disabled. Set it in .env to restrict access."
-    )
+    logger.warning("TELEGRAM_CHAT_ID not set — proactive disk alerts are disabled.")
+# Sender allowlist (TELEGRAM_ALLOWED_USERS + TELEGRAM_CHAT_ID). Enforced for
+# EVERY update by a group -1 guard registered in main(); empty = refuse to start
+# unless ALLOW_ANY_USER=true.
+ALLOWED_IDS = load_allowed_ids()
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("Set TELEGRAM_BOT_TOKEN in .env")
@@ -156,6 +170,8 @@ DETAIL_LEVELS = {"summarize", "detailed", "precise", "raw", "book", "handwritten
 # Book pipeline tuning
 BOOK_MAX_CHAPTERS = int(os.getenv("BOOK_MAX_CHAPTERS", "60"))
 BOOK_FULLTEXT = os.getenv("BOOK_FULLTEXT", "true").strip().lower() in ("1", "true", "yes")
+BOOK_MAX_CONSECUTIVE_FAILS = 3
+BOOK_MAX_FAILED_RATIO = 0.1  # write the note with placeholders up to 10% failed chapters
 # Recent-notes dashboard (silent weekly refresh — no Telegram messages)
 try:
     DASHBOARD_DAYS = max(1, int(os.getenv("DASHBOARD_DAYS", "7")))
@@ -164,6 +180,7 @@ except ValueError:
 USER_COOLDOWN_SECONDS = 10
 _user_last_request: dict = {}
 _user_last_warning: dict = {}  # suppress repeated rate-limit warnings per user
+_COOLDOWN_PRUNE_AT = 256  # prune expired cooldown entries past this size
 
 # Telegram Bot API hard limit for getFile() downloads
 TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # 20 MB
@@ -208,7 +225,6 @@ async def _fetch_thumbnail(img_url: str, slug: str) -> str:
             return ""
     return ""
 
-MAX_MODEL_BUTTONS = 30
 
 
 # ---- Command handlers ----
@@ -330,60 +346,25 @@ async def set_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
-async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List available LLM models as inline buttons; tap to switch."""
-    await update.message.reply_text("🔍 Fetching available models…")
-    catalog = await list_available_models()
-    if not catalog:
-        await update.message.reply_text(
-            "❌ No providers reachable. Check GEMINI_API_KEY / GROQ_API_KEY in .env"
-        )
-        return
-    markup, count = _build_model_keyboard(context, catalog)
-    await update.message.reply_text(
-        f"🧠 Current model: {get_current_model()}\n"
-        f"Available models: {count}\nTap one to switch:",
-        reply_markup=markup,
-    )
-
-
-def _build_model_keyboard(context: ContextTypes.DEFAULT_TYPE, catalog: dict):
-    """Build inline keyboard from a {provider: [models]} catalog."""
-    current = get_current_model()
-    flat = sorted(
-        {m for models in catalog.values() for m in models},
-        key=lambda m: (m != current, -_free_score(m), m),
-    )[:MAX_MODEL_BUTTONS]
-    context.bot_data["model_choices"] = flat
-    rows = [
-        [InlineKeyboardButton(f"{'✅ ' if m == current else ''}{m}", callback_data=f"swm:{i}")]
-        for i, m in enumerate(flat)
-    ]
-    return InlineKeyboardMarkup(rows), len(flat)
-
-
-async def model_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    choices = context.bot_data.get("model_choices", [])
-    try:
-        model = choices[int(query.data.split(":", 1)[1])]
-    except (IndexError, ValueError):
-        await query.answer("⚠️ List expired — run /models again.", show_alert=True)
-        return
-    set_current_model(model)
-    await query.edit_message_text(f"✅ Model switched to:\n{model}")
-
-
 # ---- Message handlers ----
+
+def _prune_cooldowns(now: float) -> None:
+    """Drop expired cooldown entries so the dicts don't grow without bound."""
+    if len(_user_last_request) + len(_user_last_warning) < _COOLDOWN_PRUNE_AT:
+        return
+    for d in (_user_last_request, _user_last_warning):
+        for uid in [k for k, t in d.items() if now - t >= USER_COOLDOWN_SECONDS]:
+            del d[uid]
+
 
 def _check_rate_limit(user_id: int) -> bool:
     """Return True if the user is allowed to proceed (cooldown elapsed)."""
+    now = time.monotonic()
+    _prune_cooldowns(now)
     last = _user_last_request.get(user_id)
     if last is None:  # first request ever — always allowed
-        _user_last_request[user_id] = time.monotonic()
+        _user_last_request[user_id] = now
         return True
-    now = time.monotonic()
     if now - last < USER_COOLDOWN_SECONDS:
         return False
     _user_last_request[user_id] = now
@@ -1426,6 +1407,14 @@ def _save_attachments(local_paths) -> list:
     return out
 
 
+async def _safe_edit(status, text: str) -> None:
+    """Edit a status message; 'message is not modified' and races are harmless."""
+    try:
+        await status.edit_text(text)
+    except Exception as e:
+        logger.debug("Status edit skipped: %s", e)
+
+
 async def _save_book_note(update, context, book_meta, detail_level="book", source="",
                           attachment=None, fingerprint: str = "", force: bool = False):
     """Launch background deep-processing of an e-book (map-reduce over sections)."""
@@ -1476,24 +1465,77 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
         total = len(chapters)
         logger.info(f"Book '{title}': {len(raw)} chars → {total} chapters/parts")
 
-        chapter_notes = []
-        for i, ch in enumerate(chapters, 1):
+        # Resume support: finished chapters are checkpointed in data/book_progress/
+        pkey = progress_key(fingerprint, title, len(raw))
+        done = load_progress(pkey)
+        if done:
+            await _safe_edit(status, f"📖 Resuming “{title}” — {len(done)}/{total} chapters already done.")
+
+        async def summarize(i: int, ch: dict) -> str:
             ch_title = ch.get("title") or f"Part {i}"
-            prompt = CHAPTER_PROMPT.format(
-                chapter_num=i, total=total, chapter_title=ch_title,
-                book_title=title, authors=authors,
-            )
-            section_text, _ = await chat(prompt, ch["text"][:24000], max_tokens=2500)
-            chapter_notes.append({"title": ch_title, "summary": section_text})
-            if i % 2 == 0 or i == total:
-                try:
-                    await status.edit_text(
-                        f"📖 Processing “{title}”\n"
-                        f"🧠 Summarizing chapter {i}/{total} — {ch_title[:40]}…"
+
+            def make_prompt(part: int, parts: int) -> str:
+                label = ch_title if parts == 1 else f"{ch_title} (part {part} of {parts})"
+                return CHAPTER_PROMPT.format(
+                    chapter_num=i, total=total, chapter_title=label,
+                    book_title=title, authors=authors,
+                )
+            return await summarize_chapter(make_prompt, ch["text"])
+
+        failed: List[int] = []
+        consecutive = 0
+        for i, ch in enumerate(chapters, 1):
+            if i in done:
+                continue
+            ch_title = ch.get("title") or f"Part {i}"
+            await _safe_edit(status, f"📖 Processing “{title}”\n"
+                                     f"🧠 Chapter {i}/{total} — {ch_title[:40]}…")
+            try:
+                done[i] = await summarize(i, ch)
+                save_progress(pkey, done)
+                consecutive = 0
+            except (ProviderRateLimitError, AllProvidersFailedError) as e:
+                failed.append(i)
+                consecutive += 1
+                logger.warning("Book '%s' chapter %d failed: %s", title, i,
+                               getattr(e, "attempts", None) or e)
+                if consecutive >= BOOK_MAX_CONSECUTIVE_FAILS:
+                    await _safe_edit(
+                        status,
+                        f"⏸️ Paused “{title}” at chapter {i}/{total}: every model is "
+                        f"unavailable right now (rate limits / quotas).\n"
+                        f"✅ {len(done)} chapters saved — send the same file again later "
+                        f"to resume where it stopped. /models shows model status.",
                     )
-                except Exception:
-                    pass  # message may be identical; ignore edit errors
+                    return
             await asyncio.sleep(0.5)  # be polite to free-tier rate limits
+
+        # Second chance for isolated failures (cool-downs have usually expired by now)
+        for i in list(failed):
+            try:
+                done[i] = await summarize(i, chapters[i - 1])
+                save_progress(pkey, done)
+                failed.remove(i)
+            except (ProviderRateLimitError, AllProvidersFailedError) as e:
+                logger.warning("Book '%s' chapter %d failed again: %s", title, i, e)
+        if failed and len(failed) > max(1, int(total * BOOK_MAX_FAILED_RATIO)):
+            await _safe_edit(
+                status,
+                f"⏸️ “{title}”: {len(failed)} of {total} chapters could not be summarized "
+                f"(models unavailable). {len(done)} chapters saved — send the same file "
+                f"again later to finish.",
+            )
+            return
+
+        chapter_notes = [
+            {
+                "title": ch.get("title") or f"Part {i}",
+                "summary": done.get(i) or "⚠️ Summary unavailable — every model failed "
+                                          "for this chapter. Re-send the book with "
+                                          "`--force` to retry.",
+            }
+            for i, ch in enumerate(chapters, 1)
+        ]
 
         # Full-text Markdown copy of the book inside the vault (90_Attachments/BookTexts)
         fulltext_name = ""
@@ -1510,30 +1552,43 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
                 logger.error(f"Failed to write full-text markdown: {e}")
                 fulltext_name = ""
 
-        await status.edit_text(f"📚 Synthesizing {total} chapter summaries…")
-        digest = "\n".join(
-            f"Chapter {i} — {n['title']}: {n['summary'][:300].replace(chr(10), ' ')}"
-            for i, n in enumerate(chapter_notes, 1)
-        )
+        await _safe_edit(status, f"📚 Synthesizing {total} chapter summaries…")
         synth_prompt = BOOK_SYNTHESIS_PROMPT.format(book_title=title, authors=authors)
-        synth_text, _ = await chat(synth_prompt, digest, max_tokens=2000)
+        synth_text = ""
+        for digest_chars in (300, 120):  # smaller digest if the first is too big
+            digest = "\n".join(
+                f"Chapter {i} — {n['title']}: "
+                f"{n['summary'][:digest_chars].replace(chr(10), ' ')}"
+                for i, n in enumerate(chapter_notes, 1)
+            )
+            try:
+                synth_text, _ = await chat(synth_prompt, digest, max_tokens=2000,
+                                           max_wait=BOOK_MAX_WAIT)
+                break
+            except AllProvidersFailedError as e:
+                logger.warning("Book synthesis failed (digest %d chars): %s", digest_chars, e)
+                if not e.too_large:
+                    break
+            except ProviderRateLimitError as e:
+                logger.warning("Book synthesis rate-limited: %s", e)
+                break
 
-        note_dict = _parse_response(synth_text)
+        note_dict = _parse_response(synth_text) if synth_text else None
         if not note_dict or not note_dict.get("content"):
             note_dict = {
                 "title": f"{title} — Study Notes",
                 "category": "books",
-                "content": synth_text,
+                "content": synth_text or (
+                    "## 🎯 Synopsis\n_AI synthesis was unavailable (models busy); "
+                    "the chapter summaries below are complete._"
+                ),
             }
 
         # Assemble the final note locally: synthesis + one section per chapter
         body = note_dict["content"].rstrip()
         body += "\n\n## 📖 Chapter-by-Chapter\n"
         for i, n in enumerate(chapter_notes, 1):
-            summary = n["summary"]
-            if "KEYWORD:" in summary:  # strip the keyword footer line
-                summary = summary.split("KEYWORD:", 1)[0]
-            body += f"\n### {i}. {n['title']}\n\n{summary.strip()}\n"
+            body += f"\n### {i}. {n['title']}\n\n{n['summary'].strip()}\n"
         if fulltext_name:
             link = fulltext_name.removesuffix(".md")
             body += (
@@ -1571,6 +1626,7 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
             return
         if fingerprint:
             await arecord_processed(fingerprint, "book", source, note_path)
+        clear_progress(pkey)
 
         words = len((note_dict.get("content") or "").split())
         await status.edit_text(
@@ -1596,9 +1652,9 @@ async def _process_book_task(update, book_meta, detail_level, source, attachment
         except Exception:
             pass
     except Exception as e:
-        logger.error(f"Book pipeline error: {e}")
+        logger.error("Book pipeline error: %s", e, exc_info=True)
         try:
-            await status.edit_text(f"❌ Book processing failed: {str(e)[:200]}")
+            await status.edit_text("❌ Book processing failed. The error was logged.")
         except Exception:
             pass
 
@@ -1641,8 +1697,10 @@ async def analyze_and_save(
         e.handled = True
         raise e
     except Exception as e:
-        logger.error(f"AI analysis failed: {e}")
-        await update.message.reply_text(f"❌ AI analysis failed. Error: {e}")
+        logger.error("AI analysis failed: %s", e, exc_info=True)
+        await update.message.reply_text(
+            "❌ AI analysis failed. The error was logged — run /models to check providers."
+        )
         e.handled = True
         raise e
 
@@ -1707,26 +1765,8 @@ async def analyze_and_save(
 
 
 async def _offer_model_switch(update, context):
-    """All providers failed — show which models ARE available right now."""
-    try:
-        catalog = await list_available_models()
-    except Exception as e:
-        logger.error(f"Could not fetch models for fallback UI: {e}")
-        catalog = get_catalog()
-
-    if not catalog:
-        await update.message.reply_text(
-            "🚨 AI analysis failed: no LLM provider is reachable.\n"
-            "Check your API keys (GEMINI_API_KEY / GROQ_API_KEY) in .env."
-        )
-        return
-
-    markup, count = _build_model_keyboard(context, catalog)
-    await update.message.reply_text(
-        f"🚨 AI analysis failed — configured models are unavailable.\n"
-        f"{count} working models found. Tap one to switch and retry:",
-        reply_markup=markup,
-    )
+    """All providers failed — show chain status + picker (model_menu.py)."""
+    await offer_model_switch(update, context)
 
 
 # ---- Model check (only on user request or when quota is exhausted) ----
@@ -1739,7 +1779,7 @@ async def _quota_error_text(e: Exception) -> str:
     provider = getattr(e, "provider", "unknown")
     text = (
         f"⚠️ Quota excedida ou Rate Limit atingido no provider {provider}. "
-        f"Tente novamente mais tarde.\nDetalhes: {e}"
+        "Tente novamente mais tarde."
     )
     try:
         report = await validate_and_autoswitch()
@@ -1840,6 +1880,7 @@ async def post_init(application: Application):
 def main():
     """Start the Telegram bot."""
     setup_error_logging()
+    require_allowlist(ALLOWED_IDS)  # fail closed: never run an open bot by accident
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
@@ -1847,6 +1888,9 @@ def main():
         .post_init(post_init)
         .build()
     )
+    # Allowlist guard — group -1 runs before every other handler and stops
+    # propagation for unauthorized senders.
+    app.add_handler(TypeHandler(Update, make_guard(ALLOWED_IDS)), group=-1)
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", start_command))
     app.add_handler(CommandHandler("models", models_command))
@@ -1863,7 +1907,8 @@ def main():
         app.add_handler(CommandHandler(cmd, set_detail_command))
     app.add_handler(CommandHandler("learn", learn_command))
     app.add_handler(CommandHandler("research", research_command))
-    app.add_handler(CallbackQueryHandler(model_choice_callback, pattern=r"^swm:\d+$"))
+    app.add_handler(CallbackQueryHandler(model_choice_callback, pattern=r"^swm:(\d+|auto)$"))
+    app.add_handler(CallbackQueryHandler(model_tools_callback, pattern=r"^mdl:(test|reset)$"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))

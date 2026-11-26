@@ -11,7 +11,16 @@ from typing import Any, Dict, Optional
 # NOTE: only `chat` is imported here — the provider-specific exceptions
 # (AllProvidersFailedError, ProviderRateLimitError) are raised through and
 # handled by bot.py's analyze_and_save, not in this module.
+import os
+
 from llm.provider import chat
+
+# Interactive notes may wait this long for a per-minute rate limit to reset
+# (they already run under the 10-min deadline with a status message).
+try:
+    INTERACTIVE_MAX_WAIT = float(os.getenv("LLM_INTERACTIVE_MAX_WAIT", "60"))
+except ValueError:
+    INTERACTIVE_MAX_WAIT = 60.0
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +203,8 @@ async def analyze_content(
     prompt = build_prompt(detail, source_kind)
     payload = f"Source URL: {source_url}\n\n---\n\n{content}" if source_url else content
 
-    note_text, meta_info = await chat(prompt, payload, max_tokens=8192)
+    note_text, meta_info = await chat(prompt, payload, max_tokens=8192,
+                                      max_wait=INTERACTIVE_MAX_WAIT)
     note_dict = _parse_response(note_text)
     if note_dict is None:
         return None
