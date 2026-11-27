@@ -23,7 +23,7 @@ set -euo pipefail
 REMOTE_NAME="gdrive"
 MOUNT_POINT="/srv/obsidian-vault"
 # Your Google Drive folder ID (the vault). Change if needed.
-DRIVE_FOLDER_ID="1kVr0_tbGmyQWzKcwhDddZrzOjc9XtlFY"
+DRIVE_FOLDER_ID="1JOOY7ld6mGiw2mGXPQ0C5IithM8GpC5y"
 SERVICE_NAME="rclone-gdrive"
 
 # ---------------------------------------------------------------
