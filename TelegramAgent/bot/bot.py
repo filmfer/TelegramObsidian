@@ -391,7 +391,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     except Exception as e:
         logger.error(f"Export command failed: {e}", exc_info=True)
-        await update.message.reply_text(f"❌ Export failed: {e}")
+        await update.message.reply_text("❌ Export failed. The error was logged.")
 
 
 async def vaultsync_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -538,22 +538,33 @@ async def syncstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # 4. Optional: force a full push
     if force:
         lines.append("🚀 Full sync requested — running rclone copy…")
-        import asyncio
         proc = await asyncio.create_subprocess_exec(
-            "rclone", "copy", VAULT_PATH, "gdrive:",
+            "rclone", "copy", str(VAULT_PATH), "gdrive:",
             "--config", "/root/.config/rclone/rclone.conf",
             "--transfers", "6",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        await proc.wait()
-        tail_out = (proc.stdout and await proc.stdout.read()) or b""
-        last = "\n".join(tail_out.decode("utf-8", "ignore").splitlines()[-4:])
-        lines.append("✔  rclone copy finished.")
+        # communicate() drains the pipe while waiting; wait() + PIPE can deadlock
+        # once rclone's output fills the OS pipe buffer.
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=900)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            out = b""
+            issues += 1
+            lines.append("❌ rclone copy timed out after 15 min (killed).")
+        else:
+            if proc.returncode == 0:
+                lines.append("✔  rclone copy finished.")
+            else:
+                issues += 1
+                lines.append(f"❌ rclone copy failed (exit {proc.returncode}).")
+        last = out.decode("utf-8", "ignore").splitlines()[-4:]
         if last:
-            lines.append("```")
-            lines.extend(last.splitlines())
-            lines.append("```")
+            logger.info("syncstatus force rclone output tail: %s", " | ".join(last))
+            lines.extend(f"    {t}" for t in last)
 
     verdict = "✅ immediate-sync OK" if issues == 0 else f"⚠️ {issues} issue(s)"
     response = f"⚡ SyncStatus: {verdict}\n\n" + "\n".join(lines)
@@ -564,8 +575,8 @@ async def syncstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "  systemctl restart sync-immediate\n"
             "  tail -f /var/log/sync-immediate.log\n"
         )
-    await update.message.reply_text(response, parse_mode="Markdown",
-                                    disable_web_page_preview=True)
+    # Plain text on purpose: log/rclone lines contain _ * ` that break Markdown parsing.
+    await update.message.reply_text(response, disable_web_page_preview=True)
 
 
 async def set_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

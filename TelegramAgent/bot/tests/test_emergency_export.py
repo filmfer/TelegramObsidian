@@ -59,28 +59,46 @@ def test_mirror_note_missing_source_is_none():
 def test_guard_component_blocks_traversal():
     assert "/" not in _guard_component("a/b/c", "f")
     assert ".." not in _guard_component("../evil", "f")
-    assert _guard_component("../evil", "fallback") == "sevil"  # stripped, safe
+    assert _guard_component("../evil", "fallback") == "evil"  # traversal stripped, safe
+
+
+class _FreshVault:
+    """Run a test against its own empty vault + export dir (inside the vault,
+    the worst case: export_all must not re-mirror its own output)."""
+
+    def __enter__(self):
+        self.vault = tempfile.mkdtemp(prefix="ee_fresh_")
+        self._old = (os.environ["OBSIDIAN_VAULT_PATH"], os.environ["EMERGENCY_EXPORT_DIR"])
+        os.environ["OBSIDIAN_VAULT_PATH"] = self.vault
+        os.environ["EMERGENCY_EXPORT_DIR"] = os.path.join(self.vault, "emergency_export")
+        return self.vault
+
+    def __exit__(self, *exc):
+        os.environ["OBSIDIAN_VAULT_PATH"], os.environ["EMERGENCY_EXPORT_DIR"] = self._old
+        return False
 
 
 def test_export_all_mirrors_vault():
-    _write(_TMP, "AI/note1.md", "a")
-    _write(_TMP, "Finance/note2.md", "b")
-    _write(_TMP, "90_Attachments/thumb.png", "img")
-    # Vault internals must NOT be mirrored.
-    _write(_TMP, ".obsidian/plugins/x/main.js", "plugin")
-    _write(_TMP, ".git/HEAD", "ref")
-    result = export_all()
-    assert result["files"] == 3
-    assert (export_root() / "AI" / "note1.md").is_file()
-    assert not (export_root() / ".obsidian").exists()
-    assert not (export_root() / ".git").exists()
+    with _FreshVault() as vault:
+        _write(vault, "AI/note1.md", "a")
+        _write(vault, "Finance/note2.md", "b")
+        _write(vault, "90_Attachments/thumb.png", "img")
+        # Vault internals must NOT be mirrored.
+        _write(vault, ".obsidian/plugins/x/main.js", "plugin")
+        _write(vault, ".git/HEAD", "ref")
+        result = export_all()
+        assert result["files"] == 3, result
+        assert (export_root() / "AI" / "note1.md").is_file()
+        assert not (export_root() / ".obsidian").exists()
+        assert not (export_root() / ".git").exists()
 
 
 def test_export_all_idempotent():
-    _write(_TMP, "AI/note1.md", "a")
-    r1 = export_all()
-    r2 = export_all()
-    assert r1["files"] == r2["files"] == 1
+    with _FreshVault() as vault:
+        _write(vault, "AI/note1.md", "a")
+        r1 = export_all()
+        r2 = export_all()
+        assert r1["files"] == r2["files"] == 1, (r1, r2)
 
 
 def test_scan_hazardous_notes_detects_backups():

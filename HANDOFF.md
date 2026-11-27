@@ -4,19 +4,31 @@ Hand-off from a Claude Code session on the work PC (2026-11-26) to continue on t
 To continue there, open Claude Code in this repo and say: *"read HANDOFF.md and continue"*.
 Delete this file before merging.
 
-## ⚠️ Start here: rebase onto the VM code
-This branch is based on GitHub `main` @ `0d06c83`. **The bot running on the Hetzner VM is newer
-and was never pushed:** its `/vault` reply shows "🛟 Emergency mirror", which isn't in this repo.
+## ✅ Status (2026-11-26, MacBook): rebased onto the VM code
+The VM/Mac version (v1.13: emergency mirror, /vaultsync, /syncstatus, /export, immediate-sync
+watchdog, backup_recent.sh) is now on `main`, and `main` has been **merged** into this branch.
+It was merged instead of rebased, so no force-push was needed. There were no textual conflicts.
+The allowlist guard (group −1) covers the new v1.13 commands automatically.
 
-1. Push the VM/Mac version to `main`.
-2. Then:
-   ```bash
-   git fetch origin
-   git checkout fix/security-hardening
-   git rebase main
-   ```
-3. Expect conflicts in `TelegramAgent/bot/bot.py`. Keep **both** the VM features and the changes below.
-4. Re-run the tests (see "How to test").
+These v1.13 bugs were fixed on this branch during the merge:
+- `storage/emergency_export.py`: the body of `mirror_note()` had been pasted after the `return`
+  in `note_write_lag()`, so `mirror_note()` always returned `None`. **The per-note emergency
+  mirror never worked.** Fixed.
+- `export_all()`: it now skips its own output if `EMERGENCY_EXPORT_DIR` is inside the vault.
+  Before, it copied the export folder back into itself.
+- `tests/test_emergency_export.py`: the export tests now run on their own vault (they had been
+  order-dependent), and one wrong assertion was corrected. 10/10 pass.
+- `/syncstatus force`:
+  - `communicate()` replaces `wait()` + PIPE, which deadlocked on large rclone output.
+  - 15-minute timeout.
+  - The exit code is reported instead of an unconditional "finished".
+  - Plain-text reply. Markdown with raw log lines made Telegram reject the reply.
+- `/export`: the error reply no longer includes exception text, matching this branch's policy.
+
+Tests on Python 3.12 (same as Docker): every suite passes except `test_image.py`, which needs the
+Tesseract binary.
+
+**Next:** follow the deploy checklist below, then merge into `main` and delete this file.
 
 ## What this branch changes
 

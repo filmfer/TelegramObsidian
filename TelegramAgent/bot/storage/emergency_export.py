@@ -57,6 +57,27 @@ def mirror_note(note_rel: str) -> Optional[str]:
     vault_root = os.getenv("OBSIDIAN_VAULT_PATH", "/data/vault")
     note_rel = note_rel.replace("\\", "/")
     # Reject traversal/absolute attempts defensively.
+    if note_rel.startswith("/") or note_rel.startswith("..") or "//" in note_rel:
+        logger.warning("Refusing to mirror unsafe note path: %s", note_rel)
+        return None
+    src = Path(vault_root) / note_rel
+    if not src.is_file():
+        logger.debug("mirror_note: source missing, skipping %s", note_rel)
+        return None
+    # Mirror the whole relative tree (category folders) inside the export root.
+    parts = [p for p in Path(note_rel).parts if p not in ("", ".")]
+    safe_parts = [_guard_component(p, f"item{i}") for i, p in enumerate(parts)]
+    dest = export_root().joinpath(*safe_parts)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)  # copy2 preserves mtime (useful for dashboards)
+        logger.info("Emergency mirror: %s -> %s", note_rel, dest.relative_to(export_root()))
+        return str(dest.relative_to(export_root()))
+    except Exception as e:
+        logger.error(f"Emergency mirror failed for {note_rel}: {e}", exc_info=True)
+        return None
+
+
 def export_all() -> dict:
     """Mirror every note + attachment from the vault into the export root.
 
@@ -72,10 +93,17 @@ def export_all() -> dict:
     if not root.is_dir():
         return {"files": 0, "bytes": 0, "errors": [f"vault missing: {root}"]}
 
+    dest_resolved = dest_root.resolve()
     for f in root.rglob("*"):
         # Skip vault-internal directories.
         if any(part in _EXCLUDED_DIRS for part in f.relative_to(root).parts):
             continue
+        # Never re-mirror our own output if the export dir sits inside the vault.
+        try:
+            f.resolve().relative_to(dest_resolved)
+            continue
+        except ValueError:
+            pass
         if not f.is_file():
             continue
         rel = f.relative_to(root)
@@ -125,22 +153,3 @@ def note_write_lag(days: int = 1) -> int:
         except Exception:
             continue
     return n
-    if note_rel.startswith("/") or note_rel.startswith("..") or "//" in note_rel:
-        logger.warning("Refusing to mirror unsafe note path: %s", note_rel)
-        return None
-    src = Path(vault_root) / note_rel
-    if not src.is_file():
-        logger.debug("mirror_note: source missing, skipping %s", note_rel)
-        return None
-    # Mirror the whole relative tree (category folders) inside the export root.
-    parts = [p for p in Path(note_rel).parts if p not in ("", ".")]
-    safe_parts = [_guard_component(p, f"item{i}") for i, p in enumerate(parts)]
-    dest = export_root().joinpath(*safe_parts)
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)  # copy2 preserves mtime (useful for dashboards)
-        logger.info("Emergency mirror: %s -> %s", note_rel, dest.relative_to(export_root()))
-        return str(dest.relative_to(export_root()))
-    except Exception as e:
-        logger.error(f"Emergency mirror failed for {note_rel}: {e}", exc_info=True)
-        return None
