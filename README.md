@@ -4,6 +4,8 @@
 
 > **Turn Telegram into your personal knowledge capture pipeline.** Send documents, links, and e-books to a bot — get clean, AI-categorized Markdown notes in your Obsidian vault, synced across all your devices.
 
+<img width="1100" height="614" alt="image" src="https://github.com/user-attachments/assets/10d95eb4-3e77-487d-98ea-d586717ad8c1" />
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/release-v1.12.0-blue.svg)](https://github.com/filmfer/TelegramObsidian/releases)
 [![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
