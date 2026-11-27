@@ -113,6 +113,40 @@ Send with a caption or `/command`:
 
 Run `/vault` in Telegram anytime to verify notes are being saved. If you see "Vault NOT accessible", run `bash vault-health.sh --fix` on the host.
 
+### ⚡ Sync imediato p/ Google Drive (v1.13)
+
+O vault está montado via FUSE (`rclone mount`); o `inotifywait` **não é fiável** em
+mounts FUSE (não dispara eventos de escrita de forma consistente). Por isso o repo
+incluye un watchdog de **polling a cada 1s** que envia imediatamente cada nota/ficheiro
+novo ou modificado ao Google Drive:
+
+| Ficheiro | Uso |
+|---|---|
+| `TelegramAgent/bot/scripts/sync_immediate.sh` | Script do watchdog (polling de mtimes → `rclone copyto`) |
+| `TelegramAgent/bot/scripts/sync-immediate.service` | Unit systemd para correr o watchdog 24/7 |
+
+**Instalação no servidor (una vez):**
+```bash
+sudo apt-get install -y inotify-tools            # requerido (usado como fallback/infra)
+sudo chmod +x /usr/local/bin/sync_immediate.sh   # ver nota abaixo
+# 1) copiar o script dentro do repo ao path esperado pelo unit:
+sudo cp TelegramAgent/bot/scripts/sync_immediate.sh /usr/local/bin/
+sudo cp TelegramAgent/bot/scripts/sync-immediate.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sync-immediate
+```
+
+**Estado / diagnóstico (terminal ou Telegram):**
+```bash
+systemctl status sync-immediate              # o watchdog corre?
+tail -f /var/log/sync-immediate.log          # a cada ficheiro enviado: "SYNCED: <rel>"
+```
+No **Telegram**: `/syncstatus` mostra estado do watchdog + mount + últimas entradas;
+`/syncstatus force` corre um `rclone copy` completo do vault ao Drive.
+
+> **Verify it works in seconds:** creada una nota no vault (ou envia uma ao bot); em
+> ~1-2s aparece `SYNCED: …` no log e o ficheiro já está no Drive.
+
 > **Architecture:** `Google Drive ↔ rclone mount (OBSIDIAN_VAULT_HOST_PATH, e.g. /mnt/obsidian-vault) ↔ Docker bind mount ↔ /data/vault (container) ↔ OBSIDIAN_VAULT_PATH`.
 > All three paths must resolve to the same location. **Golden rule:** after a reboot
 > or rclone restart, bring the **rclone mount up first**, then recreate the

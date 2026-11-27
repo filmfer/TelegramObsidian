@@ -4,3 +4,9 @@ __pycache__/
 .pytest_cache/
 TelegramAgent/bot/sample_test_doc.txt
 TelegramAgent/bot/ObsidianVault/
+
+.clinerules
+
+# Local-only files (never commit)
+hetzner.txt
+tg_alert.json
